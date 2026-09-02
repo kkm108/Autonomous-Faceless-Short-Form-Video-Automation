@@ -1,0 +1,9 @@
+# Persistent browser profiles with cookies/localStorage (secrets) — never commit
+profiles/
+# Run artifacts
+output/
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

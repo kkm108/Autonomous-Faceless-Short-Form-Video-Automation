@@ -1,0 +1,21 @@
+{
+  "BROWSER_CHOICE": "edge",
+  "BROWSER_CHANNEL": "msedge",
+  "HEADLESS_MODE": "headed",
+  "ANTI_AUTOMATION": true,
+  "VIEWPORT": {
+    "width": 1440,
+    "height": 900
+  },
+  "RECOVERY_ENABLED": true,
+  "RECOVERY_DEADLINE_S": 200,
+  "CHALLENGE_PAUSE_SECONDS": 180,
+  "CHALLENGE_CHECK": true,
+  "TTS_PROVIDER": "auto",
+  "TTS_BROWSER_TIMEOUT_S": 120,
+  "EDGE_TTS_VOICE": "en-US-ChristopherNeural",
+  "LLM_PROVIDER": "ai_studio",
+  "DEFAULT_WORKFLOW": "faceless_short",
+  "DEFAULT_VISIBILITY": "unlisted",
+  "RETRY_ATTEMPTS": 4
+}
