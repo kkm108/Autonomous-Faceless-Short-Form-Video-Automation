@@ -1,0 +1,62 @@
+{
+  "name": "faceless_short",
+  "description": "Generate a faceless short-form video (YouTube Short) from a seed topic and publish it.",
+  "seed_vars": ["topic"],
+  "stages": [
+    {
+      "id": "script",
+      "adapter": "scripting.generic_llm",
+      "inputs": {
+        "topic": "seed.topic"
+      },
+      "outputs": {
+        "script": "script.json"
+      }
+    },
+    {
+      "id": "assets",
+      "adapter": "assets.perchance_images",
+      "inputs": {
+        "script": "script.json",
+        "image_count": 6
+      },
+      "outputs": {
+        "images": "assets"
+      }
+    },
+    {
+      "id": "voiceover",
+      "adapter": "tts.kokoro_tts",
+      "inputs": {
+        "script": "script.json"
+      },
+      "outputs": {
+        "audio": "voiceover.wav"
+      }
+    },
+    {
+      "id": "assemble",
+      "adapter": "assembly.ffmpeg",
+      "inputs": {
+        "script": "script.json",
+        "images": "assets",
+        "audio": "voiceover.audio",
+        "video": "final.mp4"
+      },
+      "outputs": {
+        "video": "final.mp4"
+      }
+    },
+    {
+      "id": "publish",
+      "adapter": "publish.youtube_studio",
+      "inputs": {
+        "video": "final.mp4",
+        "script": "script.json"
+      },
+      "outputs": {
+        "post_url": "post_url.json"
+      }
+    }
+  ]
+}
