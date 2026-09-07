@@ -159,7 +159,7 @@ def run(ctx, inputs, run_dir, session):
     page = session.first_page()
     from ...resilience.interaction import ElementInteractor
 
-    ux = ElementInteractor(page, settings=ctx.settings)
+    ux = ElementInteractor(page, provider="perchance", settings=ctx.settings)
     ux.goto(GENERATOR_URL, wait_until="domcontentloaded")
     time.sleep(config.PERCHANCE_SETTLE_S)  # let the generator iframe + UI finish loading
     _generator_frame(page)

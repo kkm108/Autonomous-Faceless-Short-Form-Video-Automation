@@ -64,7 +64,7 @@ def _browser_soundtools(page, text: str, run_dir: Path, timeout_s: int,
     from ...resilience.interaction import ElementInteractor
     from ...resilience.location import ProviderLocations
 
-    ux = ElementInteractor(page, settings=settings)
+    ux = ElementInteractor(page, provider="tts", settings=settings)
     locs = ProviderLocations(LOCS)
 
     ux.goto(TTS_URL, wait_until="domcontentloaded")

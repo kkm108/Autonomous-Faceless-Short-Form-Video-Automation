@@ -33,7 +33,7 @@ class ElementInteractor:
         self._locs = locs
         self._provider = provider
         self._settings = settings
-        self._modals = ModalDismisser(page)
+        self._modals = ModalDismisser(page, provider=provider)
         self._rl = RateLimitAwareWaiter(page)
 
     def _with_prep(self, fn):
@@ -55,7 +55,7 @@ class ElementInteractor:
             enabled = self._settings.recovery_enabled
         return bool(recovery_mod.attempt_recover(
             self._page, desc, failed_selectors or [], loc_group, self._locs,
-            enabled=enabled))
+            enabled=enabled, provider=self._provider))
 
     def _guard(self, fn, description, loc_group, failed_selectors, value_hint=None):
         try:

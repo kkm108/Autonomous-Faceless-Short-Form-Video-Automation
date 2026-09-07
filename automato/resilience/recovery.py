@@ -11,16 +11,153 @@ The chat runs in a *separate tab* so we never navigate the working page away.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import tempfile
+from datetime import date, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .. import config
 from ..llm import chat as browser_chat
 
 log = logging.getLogger(__name__)
+
+# Recovery trend ledger (R3-W1): every LLM-recovery attempt is appended to a local
+# counter file under output/, keyed per provider per day. A trend that climbs
+# without recovery being applied back down is the early-warning sign that a target
+# site changed and the maintained static locators need a real update -- not just
+# another per-run patch.
+_TREND_FILE = "recovery_trend.json"
+
+
+def _trend_path() -> Path:
+    return config.OUTPUT_DIR / _TREND_FILE
+
+
+def _track_recovery(provider: str, success: bool) -> None:
+    """Record one recovery attempt (per provider, per local day)."""
+    path = _trend_path()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        else:
+            data = {}
+    except Exception:  # noqa: BLE001
+        data = {}
+    day = date.today().isoformat()
+    prov = provider or "unknown"
+    entry = data.setdefault(day, {}).setdefault(prov, {"attempts": 0, "succeeded": 0})
+    entry["attempts"] += 1
+    if success:
+        entry["succeeded"] += 1
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not persist recovery trend: %s", exc)
+
+
+def recovery_trend(provider: Optional[str] = None, days: int = 14) -> Dict[str, dict]:
+    """Aggregate per-provider recovery attempts over the last ``days`` days.
+
+    Returns ``{provider: {"attempts": int, "succeeded": int}}`` (plus totals under
+    the key ``"__totals__"``). Bounded read of the local counter file.
+    """
+    path = _trend_path()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            data = {}
+        if not isinstance(data, dict):
+            return {}
+    except Exception:  # noqa: BLE001
+        return {}
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    aggregated: Dict[str, dict] = {}
+    for day, providers in data.items():
+        if not isinstance(providers, dict) or day < cutoff:
+            continue
+        for prov, entry in providers.items():
+            if provider is not None and prov != provider:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            agg = aggregated.setdefault(prov, {"attempts": 0, "succeeded": 0})
+            agg["attempts"] += int(entry.get("attempts", 0) or 0)
+            agg["succeeded"] += int(entry.get("succeeded", 0) or 0)
+    for agg in aggregated.values():
+        if agg["attempts"] and not agg["succeeded"]:
+            agg["success_rate"] = 0.0
+        elif agg["attempts"]:
+            agg["success_rate"] = agg["succeeded"] / agg["attempts"]
+        else:
+            agg["success_rate"] = None
+    totals = {"attempts": sum(a["attempts"] for a in aggregated.values()),
+              "succeeded": sum(a["succeeded"] for a in aggregated.values())}
+    aggregated["__totals__"] = totals
+    return aggregated
+
+
+def trend_alert(provider: Optional[str] = None,
+                threshold: float = 3.0) -> List[dict]:
+    """Flag providers whose recovery *rate* is climbing vs. the preceding window.
+
+    Compares mean attempts/day over the most recent 7 days against the previous 7.
+    When the recent rate is >= ``threshold`` x the baseline and at least 3 attempts
+    happened recently, the element is worth surfacing as an early-warning signal.
+    """
+    path = _trend_path()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            data = {}
+        if not isinstance(data, dict):
+            return []
+    except Exception:  # noqa: BLE001
+        return []
+    today = date.today()
+    per_prov: Dict[str, dict] = {}
+    for day, providers in data.items():
+        if not isinstance(providers, dict):
+            continue
+        try:
+            d = date.fromisoformat(day)
+        except ValueError:
+            continue
+        if provider is not None:
+            providers = {k: v for k, v in providers.items() if k == provider}
+        for prov, entry in providers.items():
+            if not isinstance(entry, dict):
+                continue
+            attempts = int(entry.get("attempts", 0) or 0)
+            window = "recent" if d >= today - timedelta(days=7) else (
+                "baseline" if d >= today - timedelta(days=14) else None)
+            if window is None:
+                continue
+            slot = per_prov.setdefault(prov, {"recent": 0, "baseline": 0})
+            slot[window] += attempts
+    alerts: List[dict] = []
+    for prov, slot in per_prov.items():
+        recent, baseline = slot["recent"], slot["baseline"]
+        if recent >= 3 and baseline >= 1 and recent / 7 >= threshold * baseline / 7:
+            alerts.append({
+                "provider": prov,
+                "recent_attempts": recent,
+                "baseline_attempts": baseline,
+                "fold_increase": round(recent / baseline, 1),
+                "note": "Recovery is firing several times more often than the "
+                        "preceding week; check whether a target site's markup "
+                        "changed and update the maintained static locators.",
+            })
+    return alerts
+
 
 PROMPT = (
     "A browser automation step failed because it could not find an element to click. "
@@ -180,14 +317,16 @@ def _attempt(page, description: str, failed_selectors: List[str],
 
 def attempt_recover(page, description: str, failed_selectors: List[str],
                     group_name: Optional[str] = None, locs=None,
-                    enabled: Optional[bool] = None) -> bool:
+                    enabled: Optional[bool] = None,
+                    provider: Optional[str] = None) -> bool:
     """Ask the LLM which clickable element to click, do it, and learn on success.
 
     Returns True if a candidate was clicked successfully. Does NOT re-raise the
     original failure; callers continue/crash as they see fit.
 
     ``enabled`` (R2-W2/R2-F2) carries the run's recovery decision from settings;
-    when None the config module default applies.
+    when None the config module default applies. ``provider`` (R3-W1) scopes the
+    recovery-trend ledger entry.
     """
     if enabled is not None:
         active = enabled
@@ -201,10 +340,11 @@ def attempt_recover(page, description: str, failed_selectors: List[str],
         return False
     snapshot = build_dom_snapshot(page)
     screenshot = capture_screenshot(page)
-    log.info("Recovery: attempting LLM repair for '%s' (%d candidates)",
-             description, len(candidates))
+    log.info("Recovery: attempting LLM repair for '%s' (%d candidates) [provider=%s]",
+             description, len(candidates), provider)
     choice = _attempt(page, description, failed_selectors, candidates, snapshot, screenshot)
     if choice is None or choice <= 0 or choice > len(candidates):
+        _track_recovery(provider, False)
         return False
     cand = candidates[choice - 1]
     ok = _click_candidate(page, cand)
@@ -217,6 +357,7 @@ def attempt_recover(page, description: str, failed_selectors: List[str],
 
     if ok:
         log.info("Recovery succeeded on candidate %d (%s)", choice, cand.get("name"))
+    _track_recovery(provider, ok)
     return ok
 
 

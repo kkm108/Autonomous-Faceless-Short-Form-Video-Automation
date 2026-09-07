@@ -169,7 +169,7 @@ def run(ctx, inputs, run_dir, session):
     from ...resilience.interaction import ElementInteractor
     from ...resilience.location import ProviderLocations
 
-    ux = ElementInteractor(page, settings=ctx.settings)
+    ux = ElementInteractor(page, provider="ai_studio", settings=ctx.settings)
     locs = ProviderLocations(AI_STUDIO_LOCS)
     preferred = ctx.settings.llm_provider or "ai_studio"
 

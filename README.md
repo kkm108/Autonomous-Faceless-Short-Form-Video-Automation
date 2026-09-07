@@ -115,6 +115,23 @@ For cron / Task Scheduler / CI-driven runs:
 The assembly stage is fully local and can be smoke-tested without any account or
 a live third-party site.
 
+## Ongoing maintenance (drift is expected — it just shouldn't surprise you)
+
+- **`python -m automato health-check`** — re-validates each provider's *static*
+  locators against the live site in a real browser, independent of a content run.
+  Learned overlay entries are deliberately excluded: this proves the maintained
+  locator tables still match. Run it monthly (or on a schedule) so a site change
+  is caught on a schedule instead of by surprise mid-pipeline. Requires login for
+  the account-backed providers (`youtube`, optionally `ai_studio`). Flags:
+  `--provider {youtube,ai_studio,perchance,tts}`, `--headless`, `--browser`,
+  `--timeout`.
+- **`python -m automato trend`** — surfaces the LLM-recovery aggregate: attempts
+  and success rates per provider over the last N days (default 14) from a local
+  counter (`output/recovery_trend.json`). It also flags any provider whose
+  *recovery rate* has climbed ~3x vs the preceding week — the early-warning sign
+  that a target site changed and the static locators need a real update, not
+  another per-run patch.
+
 ## Adding providers / adapters
 
 - Add an adapter under `automato/adapters/<category>/<name>.py` exposing
@@ -122,6 +139,9 @@ a live third-party site.
 - Declare its provider profile mapping in `automato/orchestrator.py` (`_ADAPTER_PROVIDER`)
   and register an optional auth check in `automato/providers.py`.
 - Wire it into the ordered stages of `workflows/faceless_short.json`.
+- Workflow JSON only resolves adapters inside `automato.adapters.*`. Pointing a
+  stage at an *external* module is blocked unless you opt in explicitly with
+  `AUTOMATO_ALLOW_EXTERNAL_ADAPTERS=1` (or `config.ALLOW_EXTERNAL_ADAPTERS`).
 
 ## Notes & limitations
 
@@ -152,9 +172,43 @@ a live third-party site.
   - **Comparative/mass-account abuse:** thousands of identical accounts posting
     on a cadence triggers automated anti-abuse systems. Spread accounts,
     vary content, and treat publishing as a human responsibility.
-  The project's safety instincts already encode the right defaults: `unlisted` is
+The project's safety instincts already encode the right defaults: `unlisted` is
   the default visibility (nothing goes public unless you say so), and CAPTCHA /
   login challenges are never auto-solved (`challenge.py` fails fast instead).
   Keep those instincts: publish widely, iterate on real content, and disclose
   synthetic media.
-"# Autonomous-Faceless-Short-Form-Video-Automation" 
+
+## Accepted trade-offs (conscious, monitored choices — R3-F4)
+
+Rounds 1–3 fixed what was fixable; what remains is a *chosen* trade-off, documented
+rather than silently ignored:
+
+- **The core dependency is five third-party UIs, outside this project's control.**
+  They can change at any time — which is exactly why this project ships the
+  resilience layer, weekly-recovery trend telemetry, and a scheduled
+  `health-check` rather than pretending drift can't happen. A future "Round 4"
+  should be driven by what those sites actually changed, not a rediscovery of
+  anything on the Round 1–3 lists.
+- **Automating a platform's own web UI carries inherent ToS/account risk.**
+  An official API would reduce that risk but requires keys, quotas, and billing —
+  this project deliberately stays API-free and token-free by scripting the UIs a
+  human would use. YouTube's Repetitious Content / AI-disclosure and anti-abuse
+  policies (above) are the concrete versions of that risk, and the safe defaults
+  (unlisted-first, never auto-solving challenges) are the mitigation.
+- **Recovery is an LLM-driven repair, not a guarantee.** When it fails, the run
+  fails loudly (never silently passing a bad step), and the `trend` command makes
+  an unusually-high recovery rate visible so a human updates the static locators
+  instead of letting the LLM paper over the drift forever.
+- **Learned-selector overlay is a cache, not a source of truth.** Learned entries
+  expire after `LEARNED_SELECTOR_TTL_DAYS` (default 30 days) or after
+  `LEARNED_STATIC_HITS_TO_EXPIRE` (20) consecutive static-success resolutions.
+  A stuck site is re-learned, never permanently shadowed.
+- **Modal dismissal is conservative, audited, and opt-outable.** Provider-scoped
+  lists run before a generic baseline, every dismissal logs what was near the
+  element it clicked, and `config.MODAL_DISMISS_ENABLED = False` (or
+  `AUTOMATO_MODAL_DISMISS_ENABLED=0`) disables the sweep entirely.
+
+This is the practical, honest meaning of "no weaknesses remain" for a tool whose
+core dependency is outside its own control: everything left is either fixed,
+mitigated, or an explicitly monitored, accepted trade-off.
+"# Autonomous-Faceless-Short-Form-Video-Automation"

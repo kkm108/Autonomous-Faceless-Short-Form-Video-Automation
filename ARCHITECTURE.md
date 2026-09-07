@@ -86,7 +86,13 @@ seed topic
    locators fail for an interaction, it asks the LLM to synthesize candidate
    selectors, clicks the best match, and **learns** stable ones into a per-provider
    `profiles/<provider>/learned.json` overlay tried before the maintained static
-   list.
+   list. Learned entries are stamped (when/why) and expire (TTL) or are dropped
+   after repeated static-success (R3-W2/R3-F2); each recovery attempt is counted
+   per provider in `output/recovery_trend.json`, surfaced by `python -m automato
+   trend` (R3-W1). `modal.py`'s dismisser is provider-scoped and auditable
+   (R3-W4), and `location.py` retries the current candidate once on a transient
+   exception before falling back (R3-W3). Static-locator drift against live sites
+   is re-checked on demand by `python -m automato health-check` (R3-F1).
 
 ## Workflow manifest (`workflows/faceless_short.json`)
 ```json

@@ -94,6 +94,29 @@ CHALLENGE_PAUSE_SECONDS = 180
 HUMAN_DONE_FLAG = "output/.human_done"
 CHALLENGE_CHECK = True
 
+# Modal dismissal (R3-W4): sweep for interstitials before each action unless the
+# caller opts out; provider-scoped lists run before the generic baseline. Override
+# with AUTOMATO_MODAL_DISMISS_ENABLED=0|false|no.
+_MODAL_ENV = os.environ.get("AUTOMATO_MODAL_DISMISS_ENABLED", "").strip().lower()
+MODAL_DISMISS_ENABLED = True if not _MODAL_ENV else _MODAL_ENV not in (
+    "0", "false", "no", "off")
+
+# Learned-selector lifecycle (R3-W2/R3-F2): learned overlay entries are stamped
+# with when/why they were learned, expire after LEARNED_SELECTOR_TTL_DAYS, and are
+# also dropped after LEARNED_STATIC_HITS_TO_EXPIRE consecutive runs where the
+# maintained static selector resolved the group successfully.
+LEARNED_SELECTOR_TTL_DAYS = 30
+LEARNED_STATIC_HITS_TO_EXPIRE = 20
+
+# Adapter resolution policy (R3-W5/R3-F3): only in-tree automato.adapters.* paths
+# are importable from workflow JSON by default. Fully-qualified *external*
+# modules require an explicit opt-in, via the AUTOMATO_ALLOW_EXTERNAL_ADAPTERS env
+# var or by editing ALLOW_EXTERNAL_ADAPTERS.
+ALLOW_EXTERNAL_ADAPTERS = (
+    os.environ.get("AUTOMATO_ALLOW_EXTERNAL_ADAPTERS", "").strip().lower()
+    in ("1", "true", "yes")
+)
+
 
 # Pipeline
 DEFAULT_WORKFLOW = "faceless_short"

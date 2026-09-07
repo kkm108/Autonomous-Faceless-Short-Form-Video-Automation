@@ -72,7 +72,18 @@ def _import_adapter(dotted: str):
     try:
         module = importlib.import_module(mod_name)
     except ModuleNotFoundError:
-        # allow fully-qualified override strings too, e.g. "my.pkg.adapter.run"
+        # Fully-qualified override strings (e.g. "my.pkg.adapter.run") are *not*
+        # importable by default (R3-W5/R3-F3): workflow JSON is a trust boundary,
+        # and an unbounded import makes it a code-execution boundary. Opening it
+        # demands an explicit opt-in.
+        if not config.ALLOW_EXTERNAL_ADAPTERS:
+            raise WorkflowError(
+                f"Adapter '{dotted}' is not an in-tree automato adapter and "
+                "external adapter modules are blocked by default. If you "
+                "deliberately want a workflow to point at an external module, "
+                "opt in with AUTOMATO_ALLOW_EXTERNAL_ADAPTERS=1 (or set "
+                "config.ALLOW_EXTERNAL_ADAPTERS = True)."
+            )
         module_path, _, attr = dotted.rpartition(".")
         module = importlib.import_module(module_path)
         return getattr(module, attr or "run")

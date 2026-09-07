@@ -7,8 +7,10 @@ bridge data.
 """
 from __future__ import annotations
 
+import glob
 import json
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
@@ -17,6 +19,11 @@ from typing import Any, Dict
 from . import config
 
 log = logging.getLogger(__name__)
+
+# Run ids are generated internally as "<epoch>_<hex>"; the resume CLI takes one
+# from the user, so we validate the charset and glob-escape it before it shapes a
+# filesystem pattern (R3-W6).
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class RunState:
@@ -70,7 +77,10 @@ class RunState:
     @staticmethod
     def load(run_id: str) -> "RunState":
         """Load an existing run's state for resume."""
-        for p in config.OUTPUT_DIR.glob(f"{run_id}/run_state.json"):
+        if not _RUN_ID_RE.match(run_id):
+            raise FileNotFoundError(
+                f"Invalid run id '{run_id}'; expected letters, digits, '-', '_' or '.'")
+        for p in config.OUTPUT_DIR.glob(f"{glob.escape(run_id)}/run_state.json"):
             payload = json.loads(p.read_text(encoding="utf-8"))
             return RunState(
                 run_id=payload["run_id"],

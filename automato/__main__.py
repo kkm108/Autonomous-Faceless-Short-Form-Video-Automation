@@ -60,11 +60,12 @@ def cmd_login(args) -> int:
         "youtube": "https://studio.youtube.com/",
         "ai_studio": "https://aistudio.google.com/prompts/new_chat",
         "perchance": "https://perchance.org/ai-text-to-image-generator",
-        "tts": "https://soundtools.io/text-to-speech/",
     }.get(args.provider)
     if profile is None:
+        # TTS, and similarly non-login providers, are intentionally absent (R3-W6):
+        # the README documents that they need no login.
         print(f"Unknown provider '{args.provider}'. Known: " + ", ".join(
-            ["youtube", "ai_studio", "perchance", "tts"]))
+            ["youtube", "ai_studio", "perchance"]))
         return 1
 
     # login always runs headed so the human can sign in; browser choice still
@@ -142,6 +143,55 @@ def cmd_restore(args) -> int:
     return 0
 
 
+def cmd_health_check(args) -> int:
+    """R3-F1: re-validate static locators against the live sites."""
+    from .healthcheck import run as healthcheck_run
+    print("Selector health check (static locators, no learned overlay). "
+          "Login may be required for some sites; check them first with "
+          "'python -m automato login <provider>'.")
+    results = healthcheck_run(
+        provider=args.provider,
+        headless=args.headless,
+        browser_choice=args.browser,
+        timeout_ms=args.timeout,
+    )
+    print()
+    for r in results:
+        mark = "OK  " if r["ok"] else "FAIL"
+        print(f"{mark} [{r['group']}] {r['provider']}: {r['detail']}")
+    ok = sum(1 for r in results if r["ok"])
+    print(f"\n{ok}/{len(results)} locator groups resolved.")
+    return 0 if ok == len(results) else 1
+
+
+def cmd_trend(args) -> int:
+    """R3-W1: surface the recovery-attempt trend (the drift early-warning)."""
+    from .resilience import recovery as recovery_mod
+    trend = recovery_mod.recovery_trend(provider=args.provider, days=args.days)
+    totals = trend.pop("__totals__", {"attempts": 0, "succeeded": 0})
+    print(f"LLM-recovery attempts over the last {args.days} days "
+          f"({totals['attempts']} attempts, {totals['succeeded']} succeeded):")
+    rows = sorted(trend.items())
+    for prov, agg in rows:
+        rate = agg.get("success_rate")
+        rate_s = "n/a" if rate is None else f"{rate * 100:.0f}%"
+        print(f"  {prov:<12} attempts={agg['attempts']:<4} "
+              f"succeeded={agg['succeeded']:<4} success={rate_s}")
+    if not rows:
+        print("  (no recovery activity recorded yet)")
+    alerts = recovery_mod.trend_alert(provider=args.provider)
+    print()
+    if not alerts:
+        print("No upward recovery trend detected.")
+    else:
+        print(f"ATTENTION: {len(alerts)} provider(s) show a climbing recovery rate:")
+        for a in alerts:
+            print(f"  {a['provider']}: {a['fold_increase']}x the preceding week "
+                  f"({a['recent_attempts']} vs {a['baseline_attempts']} attempts). "
+                  f"{a['note']}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="automato",
                                      description="Autonomous faceless short-form video automation")
@@ -170,11 +220,34 @@ def main(argv=None) -> int:
     p_run.set_defaults(func=cmd_run)
 
     p_login = sub.add_parser("login", help="One-time visible login for a provider")
-    p_login.add_argument("provider", choices=["youtube", "ai_studio", "perchance", "tts"])
+    p_login.add_argument("provider", choices=["youtube", "ai_studio", "perchance"])
     p_login.add_argument("--browser", choices=["edge", "chrome", "brave", "chromium"],
                          default=None, help="Browser engine to use")
     p_login.add_argument("-v", "--verbose", action="store_true")
     p_login.set_defaults(func=cmd_login)
+
+    p_hc = sub.add_parser("health-check",
+                          help="Re-validate each provider's static locators against "
+                               "the live site (monthly drift check)")
+    p_hc.add_argument("--provider", default=None,
+                      help="Check a single provider: youtube | ai_studio | perchance | tts")
+    p_hc.add_argument("--headless", action="store_true",
+                      help="Run browsers hidden")
+    p_hc.add_argument("--browser", choices=["edge", "chrome", "brave", "chromium"],
+                      default=None, help="Browser engine to use")
+    p_hc.add_argument("--timeout", type=int, default=8000, metavar="MS",
+                      help="Per-locator-group timeout in milliseconds (default 8000)")
+    p_hc.add_argument("-v", "--verbose", action="store_true")
+    p_hc.set_defaults(func=cmd_health_check)
+
+    p_trend = sub.add_parser("trend",
+                             help="Show the LLM-recovery trend (drift early-warning)")
+    p_trend.add_argument("--provider", default=None,
+                         help="Filter the trend to one provider")
+    p_trend.add_argument("--days", type=int, default=14, metavar="N",
+                         help="How many days of history to summarize (default 14)")
+    p_trend.add_argument("-v", "--verbose", action="store_true")
+    p_trend.set_defaults(func=cmd_trend)
 
     p_ri = sub.add_parser("replay-import",
                           help="Import a @puppeteer/replay JSON (DevTools Recorder) "
