@@ -186,7 +186,7 @@ def run(ctx, inputs, run_dir, session):
         got: Optional[Dict[str, str]] = None
         t0 = time.time()
         while time.time() - t0 < config.PERCHANCE_MAX_PER_IMAGE_S:
-            time.sleep(config.PERCHANCE_POLL_INTERVAL_SEC)
+            time.sleep(config.PERCHANCE_POLL_INTERVAL_S)
             if scoped_ok:
                 cur = _collect_snapshot(page, gen)
                 if not cur:
