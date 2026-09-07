@@ -47,8 +47,8 @@ def _perchance_probe(page, timeout_ms: int = 15000) -> tuple:
 
 
 def _make_probes():
-    from .adapters.scripting import generic_llm
     from .adapters.publish import youtube_studio
+    from .adapters.scripting import generic_llm
     from .adapters.tts import kokoro_tts
 
     return [

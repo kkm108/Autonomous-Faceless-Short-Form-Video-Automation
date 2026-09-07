@@ -108,23 +108,20 @@ def import_replay(path: str, provider: Optional[str] = None,
         from .. import config
         target = config.PROFILES_DIR / provider / "learned.json"
     if target:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        existing = {}
-        if target.exists():
+        # The provider overlay is written through ProviderLocations.learn() so the
+        # stamped record format (when/why learned, R3-W2) holds for every writer
+        # and merge logic stays in one place. --force discards prior learned
+        # entries first (matching the CLI's documented overwrite semantics).
+        from ..resilience.location import ProviderLocations
+        if force:
             try:
-                existing = json.loads(target.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                existing = {}
-        if existing and not force:
-            # merge: new buckets win on key collision only if they differ; keep
-            # existing keys not present in the replay.
-            merged = dict(existing)
-            for k, v in buckets.items():
-                if k not in merged or merged[k] != v:
-                    merged[k] = v
-            buckets = merged
-        target.write_text(json.dumps(buckets, ensure_ascii=False, indent=2),
-                          encoding="utf-8")
+                target.write_text(json.dumps({}), encoding="utf-8")
+            except OSError:  # noqa: BLE001
+                pass
+        locs = ProviderLocations({}, learned_file=target)
+        for name, sels in buckets.items():
+            for sel in sels:
+                locs.learn(str(name), str(sel), origin="replay-import")
         wrote = str(target)
     else:
         wrote = "(stdout only)"

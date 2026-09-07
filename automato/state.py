@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 # Run ids are generated internally as "<epoch>_<hex>"; the resume CLI takes one
 # from the user, so we validate the charset and glob-escape it before it shapes a
 # filesystem pattern (R3-W6).
-_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class RunState:
@@ -79,7 +79,7 @@ class RunState:
         """Load an existing run's state for resume."""
         if not _RUN_ID_RE.match(run_id):
             raise FileNotFoundError(
-                f"Invalid run id '{run_id}'; expected letters, digits, '-', '_' or '.'")
+                f"Invalid run id '{run_id}'; expected letters, digits, '-' or '_'")
         for p in config.OUTPUT_DIR.glob(f"{glob.escape(run_id)}/run_state.json"):
             payload = json.loads(p.read_text(encoding="utf-8"))
             return RunState(
