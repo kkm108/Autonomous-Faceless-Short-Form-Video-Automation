@@ -13,10 +13,11 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+
+from ... import config
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,35 @@ FONT_CANDIDATES = [
 ]
 
 
+def _run(cmd: list, timeout_s: int = None):
+    """Run an ffmpeg/ffprobe subprocess with a timeout, logging stderr on error.
+
+    R1-W7: a stuck encode previously hung the pipeline forever and swallowed the
+    actual ffmpeg error (subprocess.run with ``capture_output=True`` raises with a
+    useless exit-status message). Now every call is bounded by
+    ``config.FFMPEG_TIMEOUT_S`` and, on failure, the real stderr is logged.
+    """
+    timeout_s = timeout_s or int(config.FFMPEG_TIMEOUT_S)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "ffmpeg not found on PATH. Install ffmpeg "
+            "(e.g. 'winget install ffmpeg' / 'apt install ffmpeg') and retry."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        log.error("Command exceeded %ss timeout: %s", timeout_s, " ".join(cmd))
+        raise RuntimeError(
+            f"ffmpeg timed out after {timeout_s}s: {' '.join(cmd)}"
+        ) from exc
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        log.error("Command failed (rc=%s): %s\n%s",
+                  proc.returncode, " ".join(cmd), stderr or "(no stderr)")
+        raise RuntimeError(f"ffmpeg command failed: {stderr or '(no stderr)'}")
+    return proc
+
+
 def _load_font(size: int):
     import os
     for cand in FONT_CANDIDATES:
@@ -45,7 +75,12 @@ def _load_font(size: int):
 
 
 def _draw_text_wrapped(draw, text, box_w, box_h, font, fill):
-    """Center-and-wrap `text` into the given box, splitting on spaces."""
+    """Center-and-wrap `text` into the given box, splitting on spaces.
+
+    Over-long captions keep the *start* (so a published caption never begins
+    mid-sentence) and drop overflowing trailing lines, signalling truncation with
+    a trailing ellipsis.
+    """
     words = text.split()
     if not words:
         return
@@ -58,9 +93,22 @@ def _draw_text_wrapped(draw, text, box_w, box_h, font, fill):
             lines.append(cur)
             cur = w
     lines.append(cur)
-    # drop overflowing lines (keep last) - simple heuristic
+    # drop overflowing lines (keep FIRST lines; truncate the tail).
+    truncated = len(lines) > CAPTION_STYLE["lines"]
     while len(lines) > CAPTION_STYLE["lines"]:
-        lines.pop(0)
+        lines.pop()
+    # trim the final kept line so it fits with an ellipsis appended.
+    ell = "\u2026"
+    if truncated and lines:
+        while lines and draw.textlength(lines[-1] + ell, font=font) > box_w:
+            lines[-1] = lines[-1][:-1].rstrip()
+            if not lines[-1]:
+                lines.pop()
+                break
+    if truncated and lines and not lines[-1].endswith(ell):
+        lines[-1] = lines[-1] + ell
+    if not lines:
+        return
     line_h = font.size * 1.15
     total_h = line_h * len(lines)
     y = (box_h - total_h) / 2
@@ -92,10 +140,9 @@ def _render_slide(bg_path: Path, caption: str, out_path: Path):
 
 
 def _probe_duration(path: Path) -> float:
-    proc = subprocess.run(
+    proc = _run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-        capture_output=True, text=True,
     )
     try:
         return float(proc.stdout.strip())
@@ -168,7 +215,7 @@ def run(ctx, inputs, run_dir, session=None):
         str(concat_mp4),
     ]
     log.info("Running ffmpeg concat build...")
-    subprocess.run(cmd_concat, check=True, capture_output=True)
+    _run(cmd_concat)
 
     # 2) apply a gentle Ken Burns zoompan + add audio
     zoompan = (
@@ -188,7 +235,7 @@ def run(ctx, inputs, run_dir, session=None):
         str(final),
     ]
     log.info("Running ffmpeg final render (zoom + audio)...")
-    subprocess.run(cmd_final, check=True, capture_output=True)
+    _run(cmd_final)
 
     if not final.exists():
         raise RuntimeError("FFmpeg assembly produced no output file")

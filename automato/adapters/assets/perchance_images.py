@@ -21,6 +21,8 @@ import logging
 import time
 from pathlib import Path
 
+from ... import config
+
 log = logging.getLogger(__name__)
 
 GENERATOR_URL = "https://perchance.org/ai-text-to-image-generator"
@@ -30,9 +32,6 @@ GENERATOR_URL = "https://perchance.org/ai-text-to-image-generator"
 PROMPT_SELECTOR = "textarea[data-name='description']"
 # The generate button (rendered as an emoji + 'generate' text).
 GENERATE_SELECTOR = "button:has-text('generate')"
-
-MAX_PER_IMAGE_SEC = 150
-POLL_INTERVAL_SEC = 5
 
 
 def _generator_frame(page):
@@ -83,7 +82,7 @@ def run(ctx, inputs, run_dir, session):
 
     ux = ElementInteractor(page)
     ux.goto(GENERATOR_URL, wait_until="domcontentloaded")
-    time.sleep(12)  # let the generator iframe + UI finish loading
+    time.sleep(config.PERCHANCE_SETTLE_S)  # let the generator iframe + UI finish loading
     _generator_frame(page)
 
     assets_dir = run_dir / "assets"
@@ -105,8 +104,8 @@ def run(ctx, inputs, run_dir, session):
         # wait for new images to appear for this generation
         got = None
         t0 = time.time()
-        while time.time() - t0 < MAX_PER_IMAGE_SEC:
-            time.sleep(POLL_INTERVAL_SEC)
+        while time.time() - t0 < config.PERCHANCE_MAX_PER_IMAGE_S:
+            time.sleep(config.PERCHANCE_POLL_INTERVAL_SEC)
             cur = _collect_finished_images(page)
             new_keys = [k for k in cur if k not in before]
             if new_keys:
@@ -130,7 +129,7 @@ def run(ctx, inputs, run_dir, session):
         fname.write_bytes(data)
         saved.append(str(fname))
         log.info("Saved asset %d -> %s (%d bytes)", idx, fname.name, len(data))
-        time.sleep(3)
+        time.sleep(config.PERCHANCE_UI_SETTLE_S)
 
     if not saved:
         raise RuntimeError("Perchance produced no saved images")

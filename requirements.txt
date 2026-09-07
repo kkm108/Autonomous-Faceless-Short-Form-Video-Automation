@@ -1,2 +1,5 @@
-playwright>=1.45
-pillow>=10.0
+playwright==1.58.0
+pillow==12.3.0
+edge-tts==7.2.7
+pyttsx3==2.99
+pyzipper==0.3.6

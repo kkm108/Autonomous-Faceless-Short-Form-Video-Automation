@@ -10,12 +10,12 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from .. import config
+from . import challenge as challenge_mod
+from . import recovery as recovery_mod
 from .modal import ModalDismisser
 from .rate_limit import RateLimitAwareWaiter
 from .retry import retry
-from . import recovery as recovery_mod
-from . import challenge as challenge_mod
-from .. import config
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +112,14 @@ class ElementInteractor:
             try:
                 outcome = challenge_mod.check_and_gate(self._page, self._provider or "browser")
                 if not outcome:
-                    log.warning("Challenge unresolved after navigating to %s", url)
+                    # Even in headed mode, an unanswered challenge after the pause
+                    # window must not silently continue into a walled-off page
+                    # (R1-W6).
+                    raise challenge_mod.ChallengeError(
+                        f"Challenge at {url} was not resolved within the wait window.",
+                    )
+            except challenge_mod.ChallengeError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 log.warning("Challenge check skipped (%s)", exc)
         return result

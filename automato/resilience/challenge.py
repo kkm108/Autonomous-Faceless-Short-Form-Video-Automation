@@ -17,6 +17,17 @@ from .. import config
 
 log = logging.getLogger(__name__)
 
+
+class ChallengeError(Exception):
+    """A CAPTCHA / 2FA / auth wall blocked the run and no human can resolve it.
+
+    Raised when a challenge is detected while the run is headless (unattended).
+    Unlike ``wait_for_human``'s degrade-and-continue, this fails the stage
+    immediately with a clear, actionable message instead of risking a misfired
+    click or a confusing cascade failure (R1-W6).
+    """
+
+
 # Very strong, unambiguous signals -- checked on their own. These are unlikely to
 # appear in benign page copy.
 _STRONG_PATTERNS = ["recaptcha", "hcaptcha", "not a robot", "verify you are human",
@@ -127,6 +138,15 @@ def check_and_gate(page, provider: str = "provider") -> bool:
     reason = detect_challenge(page)
     if reason is None:
         return True
+    if config.HEADLESS_MODE != "headed":
+        # No human can see the prompt in a headless/unattended run. Fail fast with
+        # a dedicated exception instead of degrading into an unpredictable
+        # continuation (R1-W6).
+        raise ChallengeError(
+            f"Blocked by a challenge while headless: {reason}. "
+            f"Re-run this stage headed ('--headless-mode headed') or solve the "
+            f"challenge in the browser, then resume.",
+        )
     log.info("%s for %s", reason, provider)
     return wait_for_human(
         page,

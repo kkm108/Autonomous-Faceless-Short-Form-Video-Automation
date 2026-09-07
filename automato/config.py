@@ -5,6 +5,7 @@ from anywhere.
 """
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +31,10 @@ HEADLESS_MODE = "headed"
 ANTI_AUTOMATION = True
 HEADLESS = False                     # deprecated alias kept for compatibility
 VIEWPORT = {"width": 1440, "height": 900}
+
+# Stage-level retry (R1-W3): how many times a stage that raised
+# ExecutorError(retryable=True) is re-attempted before the run fails.
+STAGE_RETRY_ATTEMPTS = 2
 
 # Resilience defaults
 DEFAULT_TIMEOUT_MS = 30000
@@ -66,7 +71,51 @@ TTS_BROWSER_TIMEOUT_S = 120
 # edge-tts voice (high-quality neural voice used by Microsoft Edge read-aloud).
 EDGE_TTS_VOICE = "en-US-ChristopherNeural"
 
+# Local ffmpeg/ffprobe budget (R1-W7): a stuck encode must not hang the pipeline
+# forever; this is the iteration timeout for each subprocess call.
+FFMPEG_TIMEOUT_S = 600
+
+# R1-F4: adapter timing constants — one place to tune the whole engine.
+# generic_llm (AI Studio / duck.ai scripting)
+GENERIC_LLM_INIT_TIMEOUT_MS = 12000   # time to find the prompt compose box
+GENERIC_LLM_POLL_DEADLINE_S = 200     # hard deadline waiting for the model reply
+# perchance_images
+PERCHANCE_SETTLE_S = 12               # generator iframe/UI settle after navigating
+PERCHANCE_UI_SETTLE_S = 3             # settle between saved generations
+PERCHANCE_MAX_PER_IMAGE_S = 150       # per-generation hard deadline
+PERCHANCE_POLL_INTERVAL_S = 5
+# youtube_studio
+YOUTUBE_UI_SETTLE_S = 3               # post-navigation settle
+YOUTUBE_POST_CLICK_SLEEP_S = 2        # micro-settle between workflow steps
+YOUTUBE_UPLOAD_DEADLINE_S = 120       # deadline for the upload dialog to reach DETAILS
+YOUTUBE_POST_PUBLISH_SLEEP_S = 6      # settle after clicking Publish/Done
+
 
 def ensure_dirs() -> None:
     for d in (PROFILES_DIR, OUTPUT_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+# Which third-party package each TTS method needs to be importable.
+TTS_DEPENDENCIES = {
+    "soundtools": (),  # browser-driving only; needs a session, not a package
+    "edge_tts": ("edge_tts",),
+    "pyttsx3": ("pyttsx3",),
+    "auto": ("edge_tts", "pyttsx3"),
+}
+
+
+def validate_environment(provider: str = "auto") -> list:
+    """Check that packages needed for the *configured* TTS provider are importable.
+
+    Returns a list of missing dependency names (empty = all present). This is a
+    startup fail-fast for the documented "guaranteed" fallback chain: if a fallback
+    link is missing, the run fails here instead of deep inside an adapter.
+    """
+    missing = []
+    for mod in TTS_DEPENDENCIES.get(provider, TTS_DEPENDENCIES["auto"]):
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            missing.append(mod)
+    return missing

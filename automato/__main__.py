@@ -11,6 +11,12 @@ from pathlib import Path
 from . import config
 from .providers import register_all
 
+# Exit-code semantics (R1-F5): distinct codes let a scheduler react.
+_EXIT_OK = 0
+_EXIT_ERROR = 1          # expected/handled failure (auth, challenge, user error)
+_EXIT_INTERNAL = 2       # unexpected crash / programming error
+_EXIT_USAGE = 3          # CLI usage error (bad args)
+
 
 def _setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
@@ -27,8 +33,16 @@ def cmd_run(args) -> int:
     config.ensure_dirs()
     config.DEFAULT_VISIBILITY = args.visibility
     _apply_browser_args(args)
-    if getattr(args, "tts", None):
-        config.TTS_PROVIDER = args.tts
+    tts_provider = getattr(args, "tts", None)
+    if tts_provider:
+        config.TTS_PROVIDER = tts_provider
+
+    missing = config.validate_environment(config.TTS_PROVIDER)
+    if missing:
+        print(f"ERROR: TTS provider '{config.TTS_PROVIDER}' needs missing "
+              f"packages: {', '.join(missing)}. Install with "
+              f"'pip install -r requirements.txt'.")
+        return _EXIT_INTERNAL
 
     seed = {"topic": args.topic}
     from .orchestrator import run_workflow
@@ -51,8 +65,8 @@ def _apply_browser_args(args) -> None:
 
 
 def cmd_login(args) -> int:
-    from .browser.session import profile_dir_for
     from .browser.factory import PersistentBrowser
+    from .browser.session import profile_dir_for
 
     profile = {
         "youtube": "https://studio.youtube.com/",
@@ -86,7 +100,8 @@ def cmd_replay_import(args) -> int:
     register_all()
     config.ensure_dirs()
     from .tools.replay_import import import_replay
-    out = import_replay(args.file, provider=args.provider, out=args.out)
+    out = import_replay(args.file, provider=args.provider, out=args.out,
+                        force=args.force)
     print(out)
     return 0
 
@@ -164,6 +179,9 @@ def main(argv=None) -> int:
     p_ri.add_argument("--provider", default=None,
                       help="Provider name to associate/locate the overlay")
     p_ri.add_argument("--out", default=None, help="Optional output JSON path")
+    p_ri.add_argument("--force", action="store_true",
+                      help="Overwrite (replace) an existing non-empty target file; "
+                           "by default new selectors merge into it")
     p_ri.add_argument("-v", "--verbose", action="store_true")
     p_ri.set_defaults(func=cmd_replay_import)
 
@@ -197,7 +215,34 @@ def main(argv=None) -> int:
 
     args = parser.parse_args(argv)
     _setup_logging(getattr(args, "verbose", False))
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        return 130
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        # Expected, domain-level failures -> distinct code + one clear line.
+        from .adapters.base import ExecutorError
+        from .backup import RestoreError
+        from .browser.session import AuthRequiredError
+        from .manifest import WorkflowError
+        if isinstance(exc, (ExecutorError, WorkflowError, RestoreError, AuthRequiredError)):
+            log = logging.getLogger("automato.cli")
+            log.error("Command failed: %s", exc)
+            sys.stderr.write(f"ERROR: {exc}\n")
+            if "--verbose" in sys.argv or isinstance(exc, ExecutorError):
+                sys.stderr.write("See the verbose log below for the full traceback.\n")
+            return _EXIT_ERROR
+        # Unexpected crash -> internal error code + traceback (DEBUG level) +
+        # a short actionable pointer.
+        log = logging.getLogger("automato.cli")
+        sys.stderr.write(f"ERROR: unexpected crash: {exc}\n")
+        sys.stderr.write("Log: use -v/--verbose for the full traceback.\n")
+        log.debug("Unexpected crash", exc_info=True)
+        traceback.print_exc(file=sys.stderr)
+        return _EXIT_INTERNAL
 
 
 if __name__ == "__main__":

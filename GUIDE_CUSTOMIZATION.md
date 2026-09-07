@@ -100,6 +100,23 @@ python -m automato run "topic" --tts edge_tts
 
 (`--tts choices: auto|soundtools|edge_tts|pyttsx3`)
 
+**Browser variants.** The engine drives a real browser with your stored sessions:
+
+- `--browser edge` (default) / `--browser chrome` reuse your installed Microsoft Edge
+  or Chrome via Playwright's `channel` — no extra downloads.
+- `--browser brave` / `chromium` need a binary. Brave is found automatically if
+  installed (falls back to bundled chromium otherwise); `chromium` uses the
+  Playwright-bundled build, so first run requires:
+
+  ```powershell
+  playwright install chromium
+  pip install playwright   # if you haven't already
+  ```
+
+  On CI and on machines without Edge/Chrome, use `chromium` to stay fully
+  self-contained. The same profile/logins work on any variant — sessions live in
+  `profiles/<provider>/`, independent of the binary.
+
 ### 3.3 Rewrite the scripting prompt (`automato/llm/script_prompts.py`)
 
 The LLM is told exactly what to emit. `generic_llm.py` parses a **delimited**

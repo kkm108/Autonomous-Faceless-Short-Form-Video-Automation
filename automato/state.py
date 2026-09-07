@@ -12,7 +12,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from . import config
 

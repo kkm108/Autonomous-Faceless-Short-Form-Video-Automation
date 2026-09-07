@@ -17,8 +17,8 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from ..llm import chat as browser_chat
 from .. import config
+from ..llm import chat as browser_chat
 
 log = logging.getLogger(__name__)
 
@@ -218,19 +218,17 @@ def _learn_if_stable(locs, group_name: str, cand: dict, page) -> None:
         eid = cand.get("css", "").lstrip("#")
         if eid and not cand["css"].startswith(f"#{eid}"):
             eid = None
-        if eid and eid.isidentifier():
+        # Accept a valid CSS id token (hyphens allowed -- e.g. "#create-button");
+        # stricter than str.isidentifier() so realistic ids aren't dropped.
+        if eid and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", eid):
             selector = f"#{eid}"
             if page.locator(selector).count() == 1:
                 locs.learn(group_name, selector)
                 return
         # Fall back to role+name if we have both (a stable, readable handle).
         if cand.get("role") and cand.get("name"):
-            role_sel = f"[role='{cand['role']}']"
             named = page.get_by_role(cand["role"], name=cand["name"], exact=False)
             if named.count() == 1:
                 locs.learn(group_name, f"get_by_role:{cand['role']}:{cand['name']}")
     except Exception:  # noqa: BLE001
         pass
-    if ok:
-        log.info("Recovery succeeded on candidate %d (%s)", choice, cand.get("name"))
-    return ok

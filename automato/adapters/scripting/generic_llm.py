@@ -20,6 +20,7 @@ import re
 import time
 from typing import Optional
 
+from ... import config
 from ...llm import chat as browser_chat
 from ...llm.script_prompts import SYS_PREAMBLE, build_user_prompt
 
@@ -100,7 +101,7 @@ def _parse_script(text: str, topic: str) -> Optional[dict]:
 def _ai_studio_ask(page, ux, locs, prompt_text: str) -> Optional[dict]:
     page.goto(AI_STUDIO_URL, wait_until="domcontentloaded", timeout=60000)
     time.sleep(4)
-    box = locs.try_resolve(page, "prompt_box", timeout=12000)
+    box = locs.try_resolve(page, "prompt_box", timeout=config.GENERIC_LLM_INIT_TIMEOUT_MS)
     if box is None:
         log.info("AI Studio not logged in / no compose box; falling back to duck.ai")
         return None
@@ -126,7 +127,7 @@ def _ai_studio_ask(page, ux, locs, prompt_text: str) -> Optional[dict]:
         box.press("Enter")
 
     last = ""
-    deadline = time.time() + 200
+    deadline = time.time() + config.GENERIC_LLM_POLL_DEADLINE_S
     while time.time() < deadline:
         time.sleep(3)
         cur = ""

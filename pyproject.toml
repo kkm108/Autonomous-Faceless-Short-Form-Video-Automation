@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automato"
+version = "0.1.0"
+description = "Autonomous faceless short-form video automation (browser-driven)"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",  # line length handled separately; keep git-blame friendly
+]
+exclude = ["output", "profiles", "backups"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["automato"]

@@ -54,11 +54,15 @@ def _selectors_for(step: dict) -> List[str]:
 
 
 def import_replay(path: str, provider: Optional[str] = None,
-                  out: Optional[str] = None) -> str:
+                  out: Optional[str] = None, force: bool = False) -> str:
     """Parse a recorded replay JSON and produce locator buckets.
 
     Returns a human-readable summary. If ``out`` is given, writes the buckets JSON
     there (or to the provider's learned overlay when ``provider`` is set and no out).
+
+    R1-W9: writing to a non-empty target merges with (rather than destroys) any
+    existing learned selectors. Overwriting an existing non-empty file requires
+    ``force=True``; otherwise a merge that yields a delta is performed.
     """
     p = Path(path)
     if not p.exists():
@@ -96,7 +100,7 @@ def import_replay(path: str, provider: Optional[str] = None,
     if start_url:
         buckets["url"] = [start_url]
 
-    # write output
+    # write output (merge-aware for non-empty targets)
     target: Optional[Path] = None
     if out:
         target = Path(out)
@@ -105,6 +109,20 @@ def import_replay(path: str, provider: Optional[str] = None,
         target = config.PROFILES_DIR / provider / "learned.json"
     if target:
         target.parent.mkdir(parents=True, exist_ok=True)
+        existing = {}
+        if target.exists():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                existing = {}
+        if existing and not force:
+            # merge: new buckets win on key collision only if they differ; keep
+            # existing keys not present in the replay.
+            merged = dict(existing)
+            for k, v in buckets.items():
+                if k not in merged or merged[k] != v:
+                    merged[k] = v
+            buckets = merged
         target.write_text(json.dumps(buckets, ensure_ascii=False, indent=2),
                           encoding="utf-8")
         wrote = str(target)

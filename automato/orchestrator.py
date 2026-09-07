@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 from . import config
 from .adapters.base import AdapterContext, ExecutorError
 from .manifest import WorkflowError, adapter_callable, load_manifest, stage_output_names
+from .resilience.retry import _backoff_delay
 from .state import RunState
 
 log = logging.getLogger(__name__)
@@ -115,9 +116,60 @@ def _check_outputs(stage_id: str, adapter: str, declared: set,
             )
 
 
+def _execute_stage(stage, ctx, inputs, run_dir, declared_outs) -> Dict[str, Any]:
+    """Run a single stage (opens its provider session if needed) and return
+    validated outputs.
+
+    Opens the browser inside a ``PersistentBrowser`` context so it is always closed
+    and its session lock always released, even when the adapter raises
+    (R1-W3/R1-W7-style guarantees).
+    """
+    from .browser import session as session_mod
+
+    sid = stage["id"]
+    provider = _ADAPTER_PROVIDER.get(stage["adapter"])
+    declared = declared_outs.get(sid, set())
+
+    browser = None
+    try:
+        if provider:
+            browser, context = session_mod.open_session(provider)
+            session_mod.run_auth_check(provider, browser)
+            session = browser  # adapters use the PersistentBrowser wrapper
+        else:
+            session = None
+
+        fn = adapter_callable(stage["adapter"])
+        try:
+            outputs = fn(ctx, inputs, run_dir, session=session)
+        except ExecutorError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Wrap raw dependency/adapter exceptions into a typed error so the
+            # engine can reason about retryability. (AGENTS.md contract.)
+            raise ExecutorError(
+                f"Stage '{sid}' ({stage['adapter']}) failed: {exc}",
+                retryable=False,
+            ) from exc
+
+        if not isinstance(outputs, dict):
+            raise ExecutorError(
+                f"Adapter '{stage['adapter']}' must return a dict",
+                retryable=False,
+            )
+
+        _check_outputs(sid, stage["adapter"], declared, outputs)
+        return outputs
+    finally:
+        if browser is not None:
+            try:
+                browser.close()
+            finally:
+                session_mod.release_session_lock(provider)
+
+
 def run_workflow(workflow_name: str, seed: Dict[str, Any],
-                 resume_run_id: Optional[str] = None,
-                 only_from_scratch: Optional[bool] = None) -> RunState:
+                 resume_run_id: Optional[str] = None) -> RunState:
     manifest = load_manifest(workflow_name)
     stages = manifest["stages"]
     declared_outs = stage_output_names(manifest)
@@ -132,59 +184,40 @@ def run_workflow(workflow_name: str, seed: Dict[str, Any],
 
     prior: Dict[str, Dict[str, Any]] = dict(state.completed or {})
 
-    from .browser import session as session_mod
-
     for stage in stages:
         sid = stage["id"]
         if sid in prior:
             log.info("Stage '%s' already complete; skipping", sid)
             continue
 
-        log.info("Starting stage '%s' (%s)", sid, stage["adapter"])
-        t0 = time.time()
         inputs = _resolve_bindings(stage.get("inputs", {}), seed, state.run_dir,
                                    prior, declared_outs)
-
-        provider = _ADAPTER_PROVIDER.get(stage["adapter"])
-        session = None
-        browser = None
-        declared = declared_outs.get(sid, set())
-        try:
-            if provider:
-                browser, context = session_mod.open_session(provider)
-                session = browser  # adapters use the PersistentBrowser wrapper
-                session_mod.run_auth_check(provider, browser)
-
-            fn = adapter_callable(stage["adapter"])
+        t0 = time.time()
+        attempts = 1 + int(config.STAGE_RETRY_ATTEMPTS)  # initial + retries
+        last_exc: Optional[ExecutorError] = None
+        outputs: Optional[Dict[str, Any]] = None
+        for attempt in range(1, attempts + 1):
             try:
-                outputs = fn(ctx, inputs, state.run_dir, session=session)
-            except ExecutorError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                # Wrap raw dependency/adapter exceptions into a typed error so the
-                # engine can reason about retryability. (AGENTS.md contract.)
-                raise ExecutorError(
-                    f"Stage '{sid}' ({stage['adapter']}) failed: {exc}",
-                    retryable=False,
-                ) from exc
-
-            if not isinstance(outputs, dict):
-                raise ExecutorError(
-                    f"Adapter '{stage['adapter']}' must return a dict",
-                    retryable=False,
+                outputs = _execute_stage(stage, ctx, inputs, state.run_dir,
+                                         declared_outs)
+                last_exc = None
+                break
+            except ExecutorError as exc:
+                last_exc = exc
+                if not exc.retryable or attempt >= attempts:
+                    break
+                delay = _backoff_delay(attempt)
+                log.warning(
+                    "Stage '%s' failed retryably (attempt %d/%d): %s; retrying in %.1fs",
+                    sid, attempt, attempts, exc, delay,
                 )
+                time.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
 
-            _check_outputs(sid, stage["adapter"], declared, outputs)
-
-            prior[sid] = outputs
-            state.mark_completed(sid, outputs)
-            log.info("Stage '%s' complete in %.1fs", sid, time.time() - t0)
-        finally:
-            if browser is not None:
-                try:
-                    browser.close()
-                finally:
-                    session_mod.release_session_lock(provider)
+        prior[sid] = outputs
+        state.mark_completed(sid, outputs)
+        log.info("Stage '%s' complete in %.1fs", sid, time.time() - t0)
 
     state.mark_done()
     log.info("Workflow '%s' finished. Run dir: %s", workflow_name, state.run_dir)
