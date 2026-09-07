@@ -1,4 +1,6 @@
-"""R1-F1: pure-logic tests for the scripting adapter's manifest parser."""
+"""R1-F1 / R2-W6: pure-logic tests for the scripting adapter's manifest parser."""
+import pytest
+
 from automato.adapters.scripting import generic_llm
 
 
@@ -40,3 +42,17 @@ def test_parse_script_ignores_garbage_lines():
     out = generic_llm._parse_script(text, "T")
     assert out["spoken_script"] == "ok"
     assert out["captions"] == ["c"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    # Whole-line END delimiter terminates (per the protocol).
+    ("TITLE | T\nNARRATION | Intro\nEND\n", True),
+    # A bare END line anywhere still counts.
+    ("END\nTITLE | T\n", True),
+    # The substring "end" inside a word must NOT terminate early (R2-W6).
+    ("TITLE | Trends and how they end soon\nNARRATION | Watch.\n", False),
+    ("this trend will end soon", False),
+    ("", False),
+])
+def test_is_full_script_delimiter_semantics(text, expected):
+    assert generic_llm._is_full_script(text) is expected

@@ -142,9 +142,19 @@ def _ai_studio_ask(page, ux, locs, prompt_text: str) -> Optional[dict]:
         if cur:
             last = cur
         parsed = _parse_script(last, "")
-        if parsed is not None and "END" in last.upper():
+        if parsed is not None and _is_full_script(last):
             return parsed
     return _parse_script(last, "")
+
+
+def _is_full_script(text: str) -> bool:
+    """True only when a *standalone* END delimiter line is present and the reply
+    has settled. R2-W6: previously any ``"END"`` substring (e.g. "...will end
+    soon") terminated the loop early; now we require a whole-line delimiter."""
+    for line in text.splitlines():
+        if line.strip().upper() == "END":
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +169,9 @@ def run(ctx, inputs, run_dir, session):
     from ...resilience.interaction import ElementInteractor
     from ...resilience.location import ProviderLocations
 
-    ux = ElementInteractor(page)
+    ux = ElementInteractor(page, settings=ctx.settings)
     locs = ProviderLocations(AI_STUDIO_LOCS)
-    preferred = getattr(ctx.global_config, "LLM_PROVIDER", "ai_studio")
+    preferred = ctx.settings.llm_provider or "ai_studio"
 
     script = None
     if preferred == "ai_studio":

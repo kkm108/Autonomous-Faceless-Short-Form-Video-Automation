@@ -46,11 +46,16 @@ def release_session_lock(provider_name: str) -> None:
         pass
 
 
-def open_session(provider_name: str, headless: Optional[bool] = None):
+def open_session(provider_name: str, headless: Optional[bool] = None,
+                 settings=None):
     """Open a persistent browser session for a provider.
 
     Returns a (PersistentBrowser, context) tuple. Caller is responsible for
     closing the PersistentBrowser.
+
+    ``settings`` (R2-W2/R2-F2) supplies browser choice / headless mode /
+    anti-automation from the run's typed settings object instead of the shared
+    config module; omitted, the module defaults apply.
 
     A per-profile lock file guards against two concurrent runs opening the same
     profile (which would corrupt the session / trip Chromium's profile lock). The
@@ -77,7 +82,13 @@ def open_session(provider_name: str, headless: Optional[bool] = None):
     except Exception:  # noqa: BLE001
         log.warning("Could not write session.lock for %s", provider_name)
 
-    browser = PersistentBrowser(pdir, headless=headless)
+    browser = PersistentBrowser(pdir, headless=headless,
+                                browser_choice=getattr(settings, "browser_choice", None)
+                                if settings else None,
+                                headless_mode=getattr(settings, "headless_mode", None)
+                                if settings else None,
+                                anti_automation=getattr(settings, "anti_automation", None)
+                                if settings else None)
     context = browser.start()
     return browser, context
 

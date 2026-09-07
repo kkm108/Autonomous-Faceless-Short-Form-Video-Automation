@@ -61,3 +61,55 @@ def test_prune_old_backups_noop_for_zero_or_within_keep():
 def test_prune_old_backups_noop_when_dir_missing():
     with tempfile.TemporaryDirectory() as d:
         assert bk.prune_old_backups(2, backups_dir=Path(d) / "nope") == []
+
+
+def test_archive_is_encrypted_roundtrip(tmp_path):
+    """R2-W7: build an encrypted archive, detect it, and restore it (hash checks
+    and merge) using an explicit passphrase. Uses a tiny isolation by pointing the
+    backup at scratch profile/workflow dirs."""
+    import json
+
+    from automato import backup as bk
+
+    profiles = tmp_path / "profiles"
+    (profiles / "youtube").mkdir(parents=True)
+    (profiles / "youtube" / "Cookies").write_bytes(b"fake-cookie-bytes")
+
+    wf = tmp_path / "workflows"
+    wf.mkdir()
+    (wf / "test.json").write_text(json.dumps({"stages": []}), encoding="utf-8")
+
+    # Point config at these scratch dirs, restore original afterward.
+    orig_p, orig_w = bk.config.PROFILES_DIR, bk.config.WORKFLOWS_DIR
+    bk.config.PROFILES_DIR, bk.config.WORKFLOWS_DIR = profiles, wf
+    archive = tmp_path / "enc.zip"
+    try:
+        bk.build_archive(out_path=archive, include_outputs=False,
+                         encrypt=True, passphrase="hunter2")
+        assert bk._archive_is_encrypted(str(archive)) is True
+
+        dest = tmp_path / "restored"
+        bk.restore_archive(archive, dest_root=dest, force=True, passphrase="hunter2")
+        assert (dest / "profiles" / "youtube" / "Cookies").exists()
+        assert (dest / "workflows" / "test.json").exists()
+    finally:
+        bk.config.PROFILES_DIR, bk.config.WORKFLOWS_DIR = orig_p, orig_w
+
+
+def test_build_archive_plain_with_no_encrypt_is_not_detected_as_encrypted(tmp_path):
+    import json
+
+    from automato import backup as bk
+
+    wf = tmp_path / "workflows"
+    wf.mkdir()
+    (wf / "test.json").write_text(json.dumps({"stages": []}), encoding="utf-8")
+    orig_w = bk.config.WORKFLOWS_DIR
+    bk.config.WORKFLOWS_DIR = wf
+    archive = tmp_path / "plain.zip"
+    try:
+        bk.build_archive(out_path=archive, include_outputs=False,
+                         encrypt=False)
+        assert bk._archive_is_encrypted(str(archive)) is False
+    finally:
+        bk.config.WORKFLOWS_DIR = orig_w

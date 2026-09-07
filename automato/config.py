@@ -6,6 +6,8 @@ from anywhere.
 from __future__ import annotations
 
 import importlib
+import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,13 +20,41 @@ STATE_FILE = OUTPUT_DIR / "state.json"
 # Browser settings
 BROWSER_CHANNEL = "msedge"          # used only when browser = edge/chrome channel launch
 BROWSER_CHOICE = "edge"             # edge | chrome | brave | chromium
+
+
+def _discover_browser_executables() -> dict:
+    """Per-platform native binaries for channel-less launches (Brave, etc.).
+
+    The primary override is the AUTOMATO_BRAVE_PATH env var; otherwise the OS's
+    usual install locations are probed (R2-W1: previously a hardcoded Windows-only
+    path, which made the 'brave' option unusable off Windows).
+    """
+    exes = {
+        "brave": os.environ.get("AUTOMATO_BRAVE_PATH"),
+        "chrome": None,
+        "edge": None,
+        "chromium": None,
+    }
+    if sys.platform == "win32":
+        candidates = [
+            r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe",
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+        ]
+    elif sys.platform == "darwin":
+        candidates = ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"]
+    else:
+        candidates = ["/usr/bin/brave-browser", "/usr/bin/brave", "/snap/bin/brave"]
+    for cand in candidates:
+        p = Path(os.path.expandvars(cand))
+        if p.is_file() and exes["brave"] is None:
+            exes["brave"] = str(p)
+            break
+    return exes
+
+
 # Native executable paths for channel-less launches (Brave, hard Chrome installs).
-BROWSER_EXECUTABLE = {
-    "brave": r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-    "chrome": None,
-    "edge": None,
-    "chromium": None,
-}
+BROWSER_EXECUTABLE = _discover_browser_executables()
 # headless mode: "headed" | "new" (headless=new, looks like a real browser) | "full"
 HEADLESS_MODE = "headed"
 # Whether to inject anti-automation flags (recommended; helps avoid bot detection).
@@ -35,6 +65,16 @@ VIEWPORT = {"width": 1440, "height": 900}
 # Stage-level retry (R1-W3): how many times a stage that raised
 # ExecutorError(retryable=True) is re-attempted before the run fails.
 STAGE_RETRY_ATTEMPTS = 2
+
+# Whole-run process guard (R2-W3/R2-F3): a run whose lock heartbeat is older than
+# RUN_LOCK_STALE_S is considered dead and its lock is reclaimed, so a crashed run
+# can never permanently wedge scheduling; a younger lock refuses a second run.
+# Should comfortably exceed the longest single stage (incl. retries).
+RUN_LOCK_STALE_S = 3600
+
+# Quality gates (R2-W4/R2-F4): when a soft-fail gate trips on any stage, publish
+# is forcibly downgraded to "unlisted" even if the run explicitly asked for public.
+FORCE_UNLISTED = False
 
 # Resilience defaults
 DEFAULT_TIMEOUT_MS = 30000

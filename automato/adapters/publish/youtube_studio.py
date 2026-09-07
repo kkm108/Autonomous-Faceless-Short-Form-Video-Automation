@@ -184,7 +184,7 @@ def run(ctx, inputs, run_dir, session):
         return {
             "post_url": str(run_dir / "post_url.json"),
             "url": prev["url"],
-            "visibility": prev.get("visibility", ctx.global_config.DEFAULT_VISIBILITY),
+            "visibility": prev.get("visibility", ctx.settings.visibility),
         }
 
     # R1-W3 idempotency gap: the previous attempt may have published but never
@@ -194,7 +194,7 @@ def run(ctx, inputs, run_dir, session):
     if attempted is not None:
         page_check = None
         try:
-            bs, _ = session_mod.open_session("youtube")
+            bs, _ = session_mod.open_session("youtube", settings=ctx.settings)
             try:
                 page_check = bs.first_page()
                 session_mod.run_auth_check("youtube", bs)
@@ -230,7 +230,13 @@ def run(ctx, inputs, run_dir, session):
             retryable=False,
         )
 
-    visibility = ctx.global_config.DEFAULT_VISIBILITY
+    visibility = ctx.settings.visibility
+    if ctx.settings.force_unlisted and visibility != "unlisted":
+        # A soft-fail quality gate tripped somewhere in this run (R2-W4/R2-F4):
+        # last safety net — never let a degraded run go live publicly.
+        log.warning("A quality gate soft-failed this run; downgrading visibility "
+                    "from '%s' to 'unlisted'", visibility)
+        visibility = "unlisted"
     title = (script.get("title") or "Untitled")[:100]
     description = "Automated faceless short.\n\n#shorts"
 
@@ -238,7 +244,7 @@ def run(ctx, inputs, run_dir, session):
     from ...resilience.interaction import ElementInteractor
     from ...resilience.location import ProviderLocations
 
-    ux = ElementInteractor(page, provider="youtube")
+    ux = ElementInteractor(page, provider="youtube", settings=ctx.settings)
     locs = ProviderLocations(LOCS, provider="youtube")
 
     ux.goto(STUDIO_URL, wait_until="domcontentloaded")

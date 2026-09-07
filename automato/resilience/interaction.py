@@ -21,16 +21,21 @@ log = logging.getLogger(__name__)
 
 
 class ElementInteractor:
-    """Wraps a Playwright page with resilient interaction helpers."""
+    """Wraps a Playwright page with resilient interaction helpers.
 
-    def __init__(self, page, locs=None, provider: Optional[str] = None):
+    ``settings`` (R2-W2/R2-F2) supplies the run's per-run decisions (headless
+    mode, recovery, challenge gating) so the resilient layer matches the run's
+    intent instead of reading a shared mutable module."""
+
+    def __init__(self, page, locs=None, provider: Optional[str] = None,
+                 settings=None):
         self._page = page
         self._locs = locs
         self._provider = provider
+        self._settings = settings
         self._modals = ModalDismisser(page)
         self._rl = RateLimitAwareWaiter(page)
 
-    # -- primitive helpers -------------------------------------------------
     def _with_prep(self, fn):
         """Dismiss modals + honor rate limits before *each* attempt of an action."""
         def guarded():
@@ -45,8 +50,12 @@ class ElementInteractor:
         if not loc_group or not recovery_mod or recovery_mod.attempt_recover is None:
             return False
         desc = description if not value_hint else f"{description} (value: {value_hint})"
+        enabled = None
+        if self._settings is not None:
+            enabled = self._settings.recovery_enabled
         return bool(recovery_mod.attempt_recover(
-            self._page, desc, failed_selectors or [], loc_group, self._locs))
+            self._page, desc, failed_selectors or [], loc_group, self._locs,
+            enabled=enabled))
 
     def _guard(self, fn, description, loc_group, failed_selectors, value_hint=None):
         try:
@@ -108,9 +117,17 @@ class ElementInteractor:
             )
 
         result = self._guard(_inner, f"goto {url}", loc_group, failed)
-        if challenge_check and config.CHALLENGE_CHECK and self._page:
+        challenge_check = (config.CHALLENGE_CHECK
+                           if self._settings is None
+                           else self._settings.challenge_check)
+        if challenge_check and self._page:
             try:
-                outcome = challenge_mod.check_and_gate(self._page, self._provider or "browser")
+                outcome = challenge_mod.check_and_gate(
+                    self._page,
+                    self._provider or "browser",
+                    headless_mode=(None if self._settings is None
+                                   else self._settings.headless_mode),
+                )
                 if not outcome:
                     # Even in headed mode, an unanswered challenge after the pause
                     # window must not silently continue into a walled-off page

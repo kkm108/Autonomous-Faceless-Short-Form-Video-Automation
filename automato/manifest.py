@@ -32,7 +32,7 @@ def load_manifest(name: str) -> Dict[str, Any]:
 
 def _validate_manifest(manifest: Dict[str, Any]) -> None:
     """Structural validation: fail fast with clear messages instead of a cryptic
-    KeyError mid-run. (#13)"""
+    KeyError mid-run."""
     stages = manifest.get("stages")
     if not isinstance(stages, list) or not stages:
         raise WorkflowError("Manifest must declare a non-empty 'stages' list")

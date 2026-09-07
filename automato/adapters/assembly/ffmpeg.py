@@ -28,12 +28,18 @@ CAPTION_STYLE = {
     "lines": 3,
 }
 
-# Candidates for a bundable font (we rely on Windows fonts present on the host).
+# System fonts are preferred where present; the bundled open-license DejaVu Sans
+# (automato/adapters/assembly/fonts/DejaVuSans.ttf) is the universal cross-platform
+# fallback so caption rendering never silently degrades to PIL's low-quality bitmap
+# font just because a runner isn't Windows (R2-W1).
+_BUNDLED_FONT = Path(__file__).resolve().parent / "fonts" / "DejaVuSans.ttf"
+
 FONT_CANDIDATES = [
-    "C:/Windows/Fonts/arialbd.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-    "C:/Windows/Fonts/segoeui.ttf",
-    "C:/Windows/Fonts/tahoma.ttf",
+    Path("C:/Windows/Fonts/arialbd.ttf"),
+    Path("C:/Windows/Fonts/arial.ttf"),
+    Path("C:/Windows/Fonts/segoeui.ttf"),
+    Path("C:/Windows/Fonts/tahoma.ttf"),
+    _BUNDLED_FONT,
 ]
 
 
@@ -67,10 +73,13 @@ def _run(cmd: list, timeout_s: int = None):
 
 
 def _load_font(size: int):
-    import os
     for cand in FONT_CANDIDATES:
-        if os.path.exists(cand):
-            return ImageFont.truetype(cand, size)
+        if cand.is_file():
+            if cand == _BUNDLED_FONT:
+                log.info("No system font found; using bundled DejaVu Sans fallback")
+            return ImageFont.truetype(str(cand), size)
+    log.warning("No TTF font available at all; using PIL default bitmap font "
+                "(low quality captions)")
     return ImageFont.load_default()
 
 

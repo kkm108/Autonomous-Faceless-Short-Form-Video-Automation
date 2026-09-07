@@ -13,7 +13,8 @@ process never calls any third-party HTTP API. Persistent profiles hold cookies /
 auth so repeated logins are never required.
 
 ## Environment verified
-- Windows, PowerShell 7, Python 3.14, Node 24, FFmpeg 8.0.1 (local assembly), 170 GB free disk.
+- **Minimum:** Python 3.10+ (matches README). CI runs 3.12/3.13 on Linux.
+- **Verified locally:** Windows, PowerShell 7, Python 3.14, FFmpeg 8.0.1 (local assembly).
 - Playwright Python 1.58 installed. Microsoft Edge present (used as the persistent browser via Playwright's channel="msedge").
 
 ## Pipeline (sequential workflow manifest)
@@ -26,7 +27,7 @@ human to relay data between browser sessions.
 | 2 | **Asset generation** | Perchance AI image generator (free, no signup) via Playwright | N images (PNG/JPG), 9:16 |
 | 3 | **Voiceover** | SoundTools/Kokoro in-browser TTS (WASM, no signup) via Playwright | audio.wav + duration (for caption timing) |
 | 4 | **Assembly** | Local FFmpeg (no browser needed — it is local compute) | final.mp4 (1080x1920, burned captions, audio bed) |
-| 5 | **Publishing** | YouTube Studio web upload via persistent context; TikTok / Instagram as adapters | live post URLs |
+| 5 | **Publishing** | YouTube Studio web upload via persistent context (TikTok / Instagram as future adapters) | live post URLs |
 
 > Rationale: stage 4 assembly is pure local computation (FFmpeg + Pillow) and
 > thereby *not* an "external task", so it is exempt from the browser rule.
@@ -40,27 +41,27 @@ seed topic
         ├─ SessionManager  : per-provider persistent browser profiles
         │                    (profiles/<provider>/), edge channel, cookies persisted
         ├─ BrowserFactory  : Playwright launch_persistent_context, headless or headed
-        ├─ adapters/       : one class per provider
+        ├─ adapters/       : one module per provider (bare `run(ctx, inputs, run_dir, session)` function)
         │     scripting/generic_llm.py
         │     assets/perchance_images.py
         │     tts/kokoro_tts.py
-        │     publish/youtube_studio.py, tiktok.py, instagram.py
-        └─ resilience/     : RetryPolicy, RateLimitAwareWaiter, ModalDismisser,
-                             Location (robust DOM targeting), ResultHandoff
+        │     publish/youtube_studio.py
+        └─ resilience/     : retry, rate_limit, modal, location, interaction, recovery
 ```
 
 ### Key modules
 
 1. **orchestrator.py** — reads the workflow manifest, runs stages sequentially,
-   passes artifacts through the `ResultHandoff` (typed dict per contract), records
-   state in localStorage/`state.json`, can resume from an aborted stage.
+   passes artifacts through typed dict handoffs, records state in a `run_state.json`
+   ledger, and can resume from an aborted stage.
 
-2. **SessionManager** — owns per-platform persistent directories
-   (`profiles/youtube`, `profiles/ai_studio`, `profiles/perchance`, ...). First run
-   opens a visible browser for one-time login (only the LLM/social sites that need
-   it); subsequent runs reuse the persisted Edge profile (cookies/localStorage).
-   Implements a **pre-run auth check** (navigate to a logged-in-only URL, look for a
-   stable ARIA element; if absent → surface a specific "re-auth required" signal).
+2. **SessionManager (browser/session.py + browser/factory.py)** — owns per-platform
+   persistent directories (`profiles/youtube`, `profiles/ai_studio`,
+   `profiles/perchance`, ...). First run opens a visible browser for one-time login
+   (only the LLM/social sites that need it); subsequent runs reuse the persisted
+   profile (cookies/localStorage). Implements a **pre-run auth check** (navigate to
+   a logged-in-only URL, look for a stable ARIA element; if absent → surface a
+   specific "re-auth required" signal).
 
 3. **adapters/publish/youtube_studio.py** — the proven, published-in-wild flow:
    - open `https://studio.youtube.com`, click Create (ARIA `Create`), choose
@@ -72,16 +73,20 @@ seed topic
    - click Publish, extract the final URL from the success dialog.
    Selectors use **semantic + ARIA locators**, never brittle full XPaths.
 
-4. **resilience/RetryPolicy.py** — exponential backoff + jitter wrapper around
-   every ambient element action. A dedicated **RateLimitAwareWaiter** detects
-   HTTP 429 / "too many requests" / challenge screens and waits rather than failing.
-   **ModalDismisser** sweeps for transient overlays, cookie banners, "stay logged
-   in?", and interstitial dialogs before acting. **Location** helper centralizes
-   semantic locator strings and re-resolves on retry (survives UI drift).
+4. **resilience/** — `retry.py` (exponential backoff + jitter wrapper around
+   every ambient element action), `rate_limit.py` (a **RateLimitAwareWaiter** that
+   detects HTTP 429 / "too many requests" / challenge screens and waits rather than
+   failing), `modal.py` (a **ModalDismisser** that sweeps for transient overlays,
+   cookie banners, "stay logged in?", and interstitial dialogs before acting),
+   `location.py` (centralized semantic/ARIA locator strings that re-resolve on
+   retry, surviving UI drift), and `interaction.py` (element helpers that inject
+   retry + modal-dismiss + backoff and prefer aria-label/role + text locators).
 
-5. **resilience/ElementInteraction.py** — a small typed wrapper (`click`, `fill`,
-   `set_input_files`, `wait_visible`) that injects retry + modal-dismiss + backoff,
-   and prefers `aria-label`/placeholder/role + text locators.
+5. **resilience/recovery.py** — self-healing locator recovery: when the static
+   locators fail for an interaction, it asks the LLM to synthesize candidate
+   selectors, clicks the best match, and **learns** stable ones into a per-provider
+   `profiles/<provider>/learned.json` overlay tried before the maintained static
+   list.
 
 ## Workflow manifest (`workflows/faceless_short.json`)
 ```json
@@ -121,26 +126,25 @@ automation system/
       factory.py        # persistent context factories (headless/headed, channel=msedge)
       session.py        # per-provider profiles + auth check
     adapters/
-      base.py           # adapter interface: run(ctx, inputs) -> outputs
+      base.py           # adapter contract: run(ctx, inputs) -> outputs + ExecutorError
       scripting/generic_llm.py
       assets/perchance_images.py
       tts/kokoro_tts.py
       assembly/ffmpeg.py   # local
       publish/youtube_studio.py
-      publish/tiktok.py     # secondary adapter
-      publish/instagram.py  # secondary adapter
     resilience/
       retry.py
       rate_limit.py
       modal.py
       location.py
       interaction.py
+      recovery.py       # LLM-assisted locator self-healing
     llm/                # generic prompt templates for script generation
       script_prompts.py
   profiles/             # persistent browser profiles per provider (created at runtime)
   output/               # artifacts per run
-  scripts/
-    login_providers.py  # one-time visible login helper
+  workflows/            # workflow manifests
+  tests/                # pytest suite (pure-logic + local ffmpeg stage) + CI
 ```
 
 ## Decisions I need from you

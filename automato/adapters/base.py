@@ -1,20 +1,39 @@
-"""Adapter base contract.
+"""Adapter contract (the engine's AGENTS.md).
 
-Each stage in the pipeline maps to an adapter that:
-  * declares its provider session name (or None if it needs no browser, e.g. FFmpeg),
-  * implements ``run(ctx, inputs, run_dir, session)`` and returns a dict of
-    outputs that exactly matches the manifest's output contract.
+Every pipeline stage maps to an adapter module under ``automato/adapters/`` that
+implements a bare module-level ``run`` function:
 
-The context object provides: config, logging, and a helper to resolve variables.
+    def run(ctx, inputs, run_dir, session=None) -> dict
+
+Contract rules:
+  * ``ctx`` is an :class:`AdapterContext` (carries seed, workflow, validated
+    per-run ``settings``, and the config module); ``inputs`` are already resolved
+    by the orchestrator (seeded variables and prior-stage artifact paths become
+    concrete values); ``run_dir`` is where the stage writes its artifacts;
+    ``session`` is the provider's persistent browser (None for local-compute
+    stages like FFmpeg).
+  * Prefer ``ctx.settings`` (typed, validated :class:`RunSettings`, R2-W2/R2-F2)
+    for anything that varies per run (visibility, TTS provider, browser/headless,
+    recovery) rather than reading the shared ``config`` module.
+  * The return value MUST be a dict whose keys exactly match the manifest's
+    declared outputs for that stage (extras are allowed; a missing declared name
+    is an error).
+  * A stage that needs a browser maps to a provider session via the
+    ``_ADAPTER_PROVIDER`` table in ``orchestrator.py``.
+  * On failure, raise :class:`ExecutorError` with ``retryable`` set truthfully:
+    True only for transient conditions where re-running the stage is likely to
+    help (network, rate-limit, in-flight upload); False for deterministic errors
+    (contract violations, missing inputs). The orchestrator wraps raw dependency
+    exceptions into ``ExecutorError(retryable=False)`` at the adapter boundary,
+    and re-attempts ``retryable=True`` stages with backoff before failing.
 """
 from __future__ import annotations
 
-import abc
 import logging
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .. import config
+from ..settings import RunSettings
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +43,9 @@ class ExecutorError(Exception):
 
     ``retryable`` tells the engine whether re-running the step is likely to help
     (True for transient issues) or whether it will always fail the same way
-    (False for deterministic/contract errors). The orchestrator wraps raw
-    dependency exceptions into this type at the adapter boundary (AGENTS.md).
+    (False for deterministic/contract errors). The orchestrator reads this flag to
+    drive stage-level retries and wraps raw dependency exceptions into this type
+    at the adapter boundary.
     """
 
     def __init__(self, message: str, retryable: bool = False):
@@ -33,32 +53,17 @@ class ExecutorError(Exception):
         self.retryable = retryable
 
 
-class AdapterResult:
-    def __init__(self, outputs: Dict[str, Any], elapsed_s: float = 0.0):
-        self.outputs = outputs
-        self.elapsed_s = elapsed_s
-
-
-class BaseAdapter(abc.ABC):
-    #: provider profile to use; None = no browser needed (local compute).
-    provider: Optional[str] = None
-    #: human-readable name of the adapter.
-    name: str = "base"
-
-    @abc.abstractmethod
-    def run(self, ctx: "AdapterContext", inputs: Dict[str, Any],
-            run_dir: Path, session=None) -> Dict[str, Any]:
-        """Execute the stage returning the stage's output dict."""
-
-    # Convenience: resolve seeded variables embedded in inputs (handled by
-    # orchestrator, so adapters normally receive already-resolved values).
-
-
 class AdapterContext:
-    """Ordinary object that carries runtime context to adapters (config, seed,
-    run dir, logger). Kept simple to avoid circular imports."""
+    """Carries runtime context to adapters: validated per-run ``settings``
+    (R2-W2/R2-F2), the seed variables, and the workflow manifest.
 
-    def __init__(self, seed: Dict[str, Any], workflow: dict):
+    ``global_config`` remains available as a stable back-compat alias for the
+    ``config`` module (constants/timings); per-run values live on
+    ``self.settings``."""
+
+    def __init__(self, seed: Dict[str, Any], workflow: dict,
+                 settings: Optional[RunSettings] = None):
         self.seed = seed
         self.workflow = workflow
+        self.settings = settings or RunSettings.defaults()
         self.global_config = config

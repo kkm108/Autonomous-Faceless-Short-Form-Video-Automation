@@ -52,6 +52,58 @@ def _attach_image(page, image_path: Optional[str]) -> None:
     log.info("Could not attach image; continuing with text-only prompt")
 
 
+def _current_reply_text(page, anchor_len: int) -> str:
+    """Return the text appended after the prompt anchor (empty until the reply
+    starts)."""
+    try:
+        full = page.locator("body").inner_text(timeout=6000) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+    return full[anchor_len:] if len(full) > anchor_len else ""
+
+
+def wait_for_completion(page, anchor_len: int, timeout_s: int = 220,
+                        stop_selector: Optional[str] = None) -> str:
+    """Shared, robust signal for "has the LLM finished streaming" (R2-W6).
+
+    Unlike the earlier per-adapter heuristics (a naive substring match that could
+    end early, vs. waiting on the whole page), the reply is considered complete
+    when BOTH of these hold:
+
+      * the reply text has stopped growing across polls (it "settled"), AND
+      * any "stop generating" control (if one is known) is no longer present —
+        a stronger, UI-level signal that generation actually finished.
+
+    When no stop control is configured we rely on the settle heuristic alone.
+    Returns the accumulated reply text (trimmed of trailing whitespace).
+    """
+    last = ""
+    unchanged = 0
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        time.sleep(3)
+        cur = _current_reply_text(page, anchor_len)
+        if cur and cur != last:
+            last = cur
+            unchanged = 0
+        else:
+            unchanged += 1
+        if len(last) <= 20:
+            continue
+        if stop_selector:
+            try:
+                still_generating = page.locator(stop_selector).count() > 0
+            except Exception:  # noqa: BLE001
+                still_generating = False
+            if still_generating:
+                continue  # keep waiting; model is still streaming
+        if unchanged >= 2:
+            break
+        if unchanged >= 6:
+            break
+    return last.strip()
+
+
 def ask(page, prompt: str, image_path: Optional[str] = None,
         timeout_s: int = 220) -> str:
     """Send ``prompt`` on duck.ai and return the raw assistant reply text.
@@ -85,26 +137,4 @@ def ask(page, prompt: str, image_path: Optional[str] = None,
     except Exception:  # noqa: BLE001
         box.press("Enter")
 
-    anchor_len = len(anchor)
-    last = anchor
-    unchanged = 0
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        time.sleep(3)
-        try:
-            cur = page.locator("body").inner_text(timeout=6000) or last
-        except Exception:  # noqa: BLE001
-            cur = last
-        if cur != last:
-            last = cur
-            unchanged = 0
-        else:
-            unchanged += 1
-        reply = last[anchor_len:] if len(last) > anchor_len else ""
-        # Heuristic: reply "settles" once it stops growing.
-        if len(reply) > 20 and unchanged >= 2:
-            break
-        if unchanged >= 5:
-            break
-    reply = last[anchor_len:] if len(last) > anchor_len else ""
-    return reply
+    return wait_for_completion(page, len(anchor), timeout_s=timeout_s)

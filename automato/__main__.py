@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import config
 from .providers import register_all
+from .settings import RunSettings
 
 # Exit-code semantics (R1-F5): distinct codes let a scheduler react.
 _EXIT_OK = 0
@@ -31,37 +32,24 @@ def _setup_logging(verbose: bool) -> None:
 def cmd_run(args) -> int:
     register_all()
     config.ensure_dirs()
-    config.DEFAULT_VISIBILITY = args.visibility
-    _apply_browser_args(args)
-    tts_provider = getattr(args, "tts", None)
-    if tts_provider:
-        config.TTS_PROVIDER = tts_provider
+    settings = RunSettings.from_args(args)
+    tts_provider = settings.tts_provider
 
-    missing = config.validate_environment(config.TTS_PROVIDER)
+    missing = config.validate_environment(tts_provider)
     if missing:
-        print(f"ERROR: TTS provider '{config.TTS_PROVIDER}' needs missing "
+        print(f"ERROR: TTS provider '{tts_provider}' needs missing "
               f"packages: {', '.join(missing)}. Install with "
               f"'pip install -r requirements.txt'.")
         return _EXIT_INTERNAL
 
     seed = {"topic": args.topic}
     from .orchestrator import run_workflow
-    state = run_workflow(args.workflow, seed, resume_run_id=args.resume)
+    state = run_workflow(args.workflow, seed, resume_run_id=args.resume,
+                         settings=settings)
     print(f"\nRun {state.run_id} finished -> {state.run_dir}")
     for sid, outputs in state.completed.items():
         print(f"  {sid}: {outputs}")
     return 0
-
-
-def _apply_browser_args(args) -> None:
-    """Apply browser selection + headless mode to config before any session opens."""
-    if getattr(args, "browser", None):
-        config.BROWSER_CHOICE = args.browser
-    if getattr(args, "headless_mode", None):
-        config.HEADLESS_MODE = args.headless_mode
-    # backwards-compatible flag: --headless forces full headless
-    if getattr(args, "headless", False):
-        config.HEADLESS_MODE = "full"
 
 
 def cmd_login(args) -> int:
@@ -79,13 +67,16 @@ def cmd_login(args) -> int:
             ["youtube", "ai_studio", "perchance", "tts"]))
         return 1
 
-    _apply_browser_args(args)
-    # login always runs headed so the human can sign in
-    config.HEADLESS_MODE = "headed"
+    # login always runs headed so the human can sign in; browser choice still
+    # honors the run's settings (R2-W2/R2-F2).
+    settings = RunSettings.from_args(args)
+    settings.headless_mode = "headed"
 
     print(f"Opening visible browser for '{args.provider}' at {profile}")
     print("Sign in as needed, then close the browser window to finish.")
-    browser = PersistentBrowser(profile_dir_for(args.provider), headless=False)
+    browser = PersistentBrowser(profile_dir_for(args.provider), headless=False,
+                                browser_choice=settings.browser_choice,
+                                headless_mode=settings.headless_mode)
     with browser:
         page = browser.first_page()
         page.goto(profile, wait_until="domcontentloaded", timeout=60000)
@@ -110,9 +101,14 @@ def cmd_backup(args) -> int:
     config.ensure_dirs()
     from .backup import build_archive
     print("Backing up profiles, workflows, config and run outputs...")
-    print("WARNING: the archive contains live signed-in sessions. Treat it as a "
-          "secret (encrypt/rotate accordingly).")
-    path = build_archive(out_path=args.out, include_outputs=not args.no_outputs)
+    if args.no_encrypt:
+        print("WARNING: --no-encrypt means the archive contains live signed-in "
+              "sessions in plaintext. Protect it yourself (encrypt/rotate).")
+    else:
+        print("Backup will be AES-encrypted (set AUTOMATO_BACKUP_PASSPHRASE to "
+              "use your own passphrase, or record the generated one).")
+    path = build_archive(out_path=args.out, include_outputs=not args.no_outputs,
+                         encrypt=not args.no_encrypt, passphrase=args.passphrase)
     print(f"\nBackup written -> {path}")
     if args.keep > 0:
         from .backup import prune_old_backups
@@ -128,11 +124,17 @@ def cmd_restore(args) -> int:
     from .backup import restore_archive
     dest = args.dir.resolve() if args.dir else None
     print(f"Restoring {args.archive} into {dest or '<current root>'}")
+    if args.passphrase:
+        print("Using the provided --passphrase to decrypt the archive.")
+    else:
+        print("If the archive is encrypted I'll read the passphrase from "
+              "the AUTOMATO_BACKUP_PASSPHRASE env var.")
     print("WARNING: restoring signed-in sessions onto this machine will let the "
           "engine act as those accounts. Make sure this is the machine you want.")
     try:
         root = restore_archive(Path(args.archive), dest_root=dest,
-                               force=args.force, apply_config=args.apply_config)
+                               force=args.force, apply_config=args.apply_config,
+                               passphrase=args.passphrase)
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: {exc}")
         return 1
@@ -150,7 +152,9 @@ def main(argv=None) -> int:
     p_run.add_argument("--workflow", default=config.DEFAULT_WORKFLOW,
                        help="Workflow manifest name")
     p_run.add_argument("--visibility", choices=["public", "unlisted", "private"],
-                       default=config.DEFAULT_VISIBILITY)
+                       default=None,
+                       help="public | unlisted | private (default: AUTOMATO_VISIBILITY "
+                            "env var, else config default = unlisted)")
     p_run.add_argument("--resume", default=None,
                        help="Resume an existing run by its run id")
     p_run.add_argument("--headless", action="store_true",
@@ -196,6 +200,13 @@ def main(argv=None) -> int:
     p_bk.add_argument("--keep", type=int, default=0, metavar="N",
                       help="Keep only the newest N backups, pruning older ones "
                            "(0 = keep all)")
+    p_bk.add_argument("--no-encrypt", action="store_true",
+                      help="Write an unencrypted archive (default: AES-encrypted, "
+                           "since backups carry live sessions)")
+    p_bk.add_argument("--passphrase", default=None,
+                      help="Passphrase for the AES archive (default: "
+                           "AUTOMATO_BACKUP_PASSPHRASE env var, else a randomly "
+                           "generated one that is printed)")
     p_bk.add_argument("-v", "--verbose", action="store_true")
     p_bk.set_defaults(func=cmd_backup)
 
@@ -210,6 +221,9 @@ def main(argv=None) -> int:
     p_rs.add_argument("--apply-config", action="store_true",
                       help="Re-apply the source machine's config values to the "
                            "destination config.py (idempotent override block)")
+    p_rs.add_argument("--passphrase", default=None,
+                      help="Passphrase to decrypt an encrypted archive (default: "
+                           "AUTOMATO_BACKUP_PASSPHRASE env var)")
     p_rs.add_argument("-v", "--verbose", action="store_true")
     p_rs.set_defaults(func=cmd_restore)
 
@@ -228,7 +242,9 @@ def main(argv=None) -> int:
         from .backup import RestoreError
         from .browser.session import AuthRequiredError
         from .manifest import WorkflowError
-        if isinstance(exc, (ExecutorError, WorkflowError, RestoreError, AuthRequiredError)):
+        from .run_guard import RunGuardError
+        if isinstance(exc, (ExecutorError, WorkflowError, RestoreError,
+                            AuthRequiredError, RunGuardError)):
             log = logging.getLogger("automato.cli")
             log.error("Command failed: %s", exc)
             sys.stderr.write(f"ERROR: {exc}\n")

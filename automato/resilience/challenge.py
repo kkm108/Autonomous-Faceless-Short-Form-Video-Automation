@@ -130,15 +130,21 @@ def wait_for_human(page, instructions: str, timeout_s: Optional[int] = None) -> 
     return False
 
 
-def check_and_gate(page, provider: str = "provider") -> bool:
+def check_and_gate(page, provider: str = "provider",
+                   headless_mode: Optional[str] = None) -> bool:
     """One-shot: detect a challenge and, if present, pause for the human.
 
     Returns True if the page is clear (no challenge, or resolved), False otherwise.
+
+    ``headless_mode`` (R2-W2/R2-F2) comes from the run's settings so a headless
+    run fails fast at the challenge instead of "pausing for a human" nobody can
+    see; defaults to the config module value when not threaded.
     """
     reason = detect_challenge(page)
     if reason is None:
         return True
-    if config.HEADLESS_MODE != "headed":
+    mode = headless_mode or config.HEADLESS_MODE
+    if mode != "headed":
         # No human can see the prompt in a headless/unattended run. Fail fast with
         # a dedicated exception instead of degrading into an unpredictable
         # continuation (R1-W6).

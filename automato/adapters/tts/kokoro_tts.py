@@ -58,12 +58,13 @@ LOCS = {
 }
 
 
-def _browser_soundtools(page, text: str, run_dir: Path, timeout_s: int) -> Path:
+def _browser_soundtools(page, text: str, run_dir: Path, timeout_s: int,
+                        settings=None) -> Path:
     """Attempt SoundTools in the given browser. Raises on any failure."""
     from ...resilience.interaction import ElementInteractor
     from ...resilience.location import ProviderLocations
 
-    ux = ElementInteractor(page)
+    ux = ElementInteractor(page, settings=settings)
     locs = ProviderLocations(LOCS)
 
     ux.goto(TTS_URL, wait_until="domcontentloaded")
@@ -161,7 +162,7 @@ def run(ctx, inputs, run_dir, session=None):
     if not text:
         raise ValueError("No spoken_script in script for TTS stage")
 
-    provider = (config.TTS_PROVIDER or "auto").strip().lower()
+    provider = (ctx.settings.tts_provider or "auto").strip().lower()
     chain = []
     if provider == "auto":
         chain = ["soundtools", "edge_tts", "pyttsx3"]
@@ -181,7 +182,8 @@ def run(ctx, inputs, run_dir, session=None):
                 if page is None:
                     raise RuntimeError("no browser session for soundtools")
                 path = _browser_soundtools(page, text, run_dir,
-                                           config.TTS_BROWSER_TIMEOUT_S)
+                                       config.TTS_BROWSER_TIMEOUT_S,
+                                       settings=ctx.settings)
             elif method == "edge_tts":
                 path = _edge_tts(text, run_dir)
             elif method == "pyttsx3":

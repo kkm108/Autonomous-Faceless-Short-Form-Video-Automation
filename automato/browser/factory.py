@@ -44,12 +44,15 @@ class PersistentBrowser:
 
     def __init__(self, profile_dir: Path, headless: Optional[bool] = None,
                  viewport: Optional[dict] = None, browser_choice: Optional[str] = None,
-                 headless_mode: Optional[str] = None):
+                 headless_mode: Optional[str] = None,
+                 anti_automation: Optional[bool] = None):
         profile_dir.mkdir(parents=True, exist_ok=True)
         self.profile_dir = profile_dir
         self.viewport = viewport or config.VIEWPORT
         self.browser_choice = browser_choice or config.BROWSER_CHOICE
         self.headless_mode = headless_mode or config.HEADLESS_MODE
+        self.anti_automation = (config.ANTI_AUTOMATION
+                                if anti_automation is None else anti_automation)
         self.headless = headless if headless is not None else (self.headless_mode != "headed")
         self._pw = None
         self._context = None
@@ -65,7 +68,7 @@ class PersistentBrowser:
         self._pw = sync_playwright().start()
         kwargs, extra_argv = _launch_params_for(self.browser_choice, self.headless_mode)
 
-        if config.ANTI_AUTOMATION:
+        if self.anti_automation:
             kwargs.setdefault("args", []).extend([
                 "--disable-blink-features=AutomationControlled",
                 "--start-maximized",

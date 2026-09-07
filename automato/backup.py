@@ -33,8 +33,14 @@ Security / robustness notes:
     the destination ``config.py`` (an idempotent override block), so an altered
     configuration can be reproduced, not just its data.
 
-NOTE: ``.zip`` is an open format. A backup contains live login sessions for the
-suite's providers, so treat backups as secrets -- store/encrypt them accordingly.
+Encryption (R2-W7): a backup contains live login sessions, so it is AES-encrypted
+by default using ``pyzipper``. The passphrase comes from the
+``AUTOMATO_BACKUP_PASSPHRASE`` environment variable; if that is unset a random
+one is generated and printed once for you to record. Pass explicit
+``encrypt=False`` (CLI ``--no-encrypt``) only when you have your own transport
+protection. Restore reads the same ``AUTOMATO_BACKUP_PASSPHRASE`` env var (or an
+explicit ``passphrase=`` argument), and auto-detects whether the archive is
+encrypted.
 """
 from __future__ import annotations
 
@@ -42,11 +48,14 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import shutil
 import time
 import zipfile
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
+
+import pyzipper
 
 from . import config
 
@@ -54,6 +63,9 @@ log = logging.getLogger(__name__)
 
 ARCHIVE_MANIFEST = "backup-manifest.json"
 CONFIG_SNAPSHOT = "config-snapshot.json"
+
+# Passphrase override, shared by build and restore.
+PASSPHRASE_ENV = "AUTOMATO_BACKUP_PASSPHRASE"
 
 # Name of the engine-root directory inside the archive.
 ROOT_KEY = "automato_state"
@@ -184,16 +196,23 @@ def _is_file_info(info: zipfile.ZipInfo) -> bool:
 # build_archive --------------------------------------------------------------
 # ---------------------------------------------------------------------------
 def build_archive(out_path: Optional[Path] = None,
-                  include_outputs: bool = True) -> Path:
+                  include_outputs: bool = True,
+                  encrypt: bool = True,
+                  passphrase: Optional[str] = None) -> Path:
     """Bundle profiles, workflows, config, and (optionally) run outputs into a
-    portable ``.zip`` and return its path.
+    portable archive and return its path.
+
+    By default the archive is AES-encrypted (``pyzipper``) because it carries
+    live login sessions; pass ``encrypt=False`` to opt out (R2-W7). The
+    passphrase comes from an explicit argument, else ``AUTOMATO_BACKUP_PASSPHRASE``,
+    else a freshly generated random value that is logged once for you to record.
 
     Emits a ``backup-manifest.json`` (with per-file SHA-256) and a
     ``config-snapshot.json`` inside the archive so a restore can validate
     integrity and (optionally) reproduce the source configuration.
     """
     out_path = Path(out_path or _default_out_path()).resolve()
-    if out_path.suffix.lower() != ".zip":
+    if out_path.suffix.lower() not in (".zip", ".zpw"):
         out_path = out_path.with_suffix(".zip")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -208,8 +227,8 @@ def build_archive(out_path: Optional[Path] = None,
     if include_outputs:
         sources.append((config.OUTPUT_DIR, f"{ROOT_KEY}/output"))
 
-    # #9: never bundle an archive into its own subtree (generalized guard -- out
-    # path living under ANY bundled source would recursively grow forever).
+    # Never bundle an archive into its own subtree (an output path living under
+    # ANY bundled source would recursively grow forever).
     kept: List[Tuple[Path, str]] = []
     for src, arc_prefix in sources:
         if _is_within(out_path, src):
@@ -220,6 +239,40 @@ def build_archive(out_path: Optional[Path] = None,
     sources = kept
 
     counts: dict = {}
+    manifest["encrypted"] = bool(encrypt)
+    if encrypt:
+        _write_encrypted(out_path, sources, manifest, counts, passphrase)
+    else:
+        _write_plainzip(out_path, sources, manifest, counts)
+
+    log.info("Backup written: %s (%s files%s)", out_path, sum(counts.values()),
+             " [AES] encrypted" if encrypt else " [PLAIN] unencrypted")
+    return out_path
+
+
+def _resolve_passphrase(passphrase: Optional[str]) -> Optional[bytes]:
+    if passphrase:
+        return passphrase.encode("utf-8")
+    env = os.environ.get(PASSPHRASE_ENV)
+    if env:
+        return env.encode("utf-8")
+    return None
+
+
+def _pick_or_generate_passphrase(passphrase: Optional[str]) -> bytes:
+    pw = _resolve_passphrase(passphrase)
+    if pw:
+        return pw
+    generated = secrets.token_urlsafe(32)
+    log.warning(
+        "AES-encrypting backup with a fresh random passphrase (no "
+        "%s env var set). STORE THIS KEY — without it the backup cannot be "
+        "restored:\n  %s", PASSPHRASE_ENV, generated,
+    )
+    return generated.encode("utf-8")
+
+
+def _write_plainzip(out_path: Path, sources, manifest: dict, counts: dict) -> None:
     with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for src, arc_prefix in sources:
             if not src.exists():
@@ -233,18 +286,45 @@ def build_archive(out_path: Optional[Path] = None,
                 manifest["hashes"][arc] = _sha256(data)
                 n += 1
             counts[src.name] = n
-
         counts["config"] = 1
         manifest["counts"] = counts
-
         snapshot = _config_snapshot()
         zf.writestr(f"{ROOT_KEY}/{CONFIG_SNAPSHOT}",
                     json.dumps(snapshot, ensure_ascii=False, indent=2))
         zf.writestr(f"{ROOT_KEY}/{ARCHIVE_MANIFEST}",
                     json.dumps(manifest, ensure_ascii=False, indent=2))
 
-    log.info("Backup written: %s (%s files)", out_path, sum(counts.values()))
-    return out_path
+
+def _write_encrypted(out_path: Path, sources, manifest: dict, counts: dict,
+                     passphrase: Optional[str]) -> None:
+    password = _pick_or_generate_passphrase(passphrase)
+    try:
+        zf_cls = pyzipper.AESZipFile
+        kw = dict(compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES)
+    except Exception:  # noqa: BLE001
+        zf_cls = pyzipper.ZipFile
+        kw = dict(compression=pyzipper.ZIP_DEFLATED)
+    with zf_cls(str(out_path), "w", **kw) as zf:
+        zf.setpassword(password)
+        for src, arc_prefix in sources:
+            if not src.exists():
+                continue
+            n = 0
+            for p in _iter_tree(src):
+                rel = p.relative_to(src)
+                arc = f"{arc_prefix}/{rel.as_posix()}"
+                data = p.read_bytes()
+                zf.writestr(arc, data)
+                manifest["hashes"][arc] = _sha256(data)
+                n += 1
+            counts[src.name] = n
+        counts["config"] = 1
+        manifest["counts"] = counts
+        snapshot = _config_snapshot()
+        zf.writestr(f"{ROOT_KEY}/{CONFIG_SNAPSHOT}",
+                    json.dumps(snapshot, ensure_ascii=False, indent=2))
+        zf.writestr(f"{ROOT_KEY}/{ARCHIVE_MANIFEST}",
+                    json.dumps(manifest, ensure_ascii=False, indent=2))
 
 
 def prune_old_backups(keep: int, backups_dir: Optional[Path] = None) -> List[Path]:
@@ -276,8 +356,8 @@ def prune_old_backups(keep: int, backups_dir: Optional[Path] = None) -> List[Pat
 
 
 def _warn_if_busy() -> None:
-    """#10: warn when unfinished/in-progress runs exist, so a backup taken
-    mid-run is not mistaken for a clean snapshot."""
+    """Warn when unfinished/in-progress runs exist, so a backup taken mid-run is
+    not mistaken for a clean snapshot."""
     try:
         unfinished = 0
         for rs in config.OUTPUT_DIR.glob("*/run_state.json"):
@@ -421,7 +501,7 @@ def _validate_entries(names: List[str], root_key: str) -> None:
 
 
 def _verify_integrity(staging_root: Path, manifest: dict) -> None:
-    """#8: verify every hashed file extracted correctly before merge."""
+    """Verify every hashed file extracted correctly before merge."""
     hashes = manifest.get("hashes") or {}
     for arc, expected in hashes.items():
         f = staging_root / arc
@@ -478,8 +558,22 @@ def _apply_config_to(path: Path, snapshot: dict) -> None:
 # ---------------------------------------------------------------------------
 # restore_archive ------------------------------------------------------------
 # ---------------------------------------------------------------------------
+def _archive_is_encrypted(path: str) -> bool:
+    """Best-effort detection: an AES-encrypted pyzipper archive exposes entries
+    whose flag bits mark them as encrypted."""
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            first = next((i for i in zf.infolist() if not i.is_dir()), None)
+            if first is None:
+                return False
+            return bool(first.flag_bits & 0x1)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def restore_archive(archive: Path, dest_root: Optional[Path] = None,
-                    force: bool = False, apply_config: bool = False) -> Path:
+                    force: bool = False, apply_config: bool = False,
+                    passphrase: Optional[str] = None) -> Path:
     """Extract a backup archive onto the target engine root and rebind absolute
     paths for portability.
 
@@ -494,6 +588,10 @@ def restore_archive(archive: Path, dest_root: Optional[Path] = None,
     ``apply_config`` re-applies the source machine's portable config values to
     the destination ``config.py`` (idempotent override block), reproducing an
     altered configuration rather than only its data.
+
+    ``passphrase`` decrypts an AES-encrypted archive; if omitted the
+    ``AUTOMATO_BACKUP_PASSPHRASE`` env var is used. Encryption is auto-detected
+    (R2-W7); an encrypted archive without the right passphrase fails to read.
     """
     archive = Path(archive).resolve()
     if not archive.exists():
@@ -511,10 +609,24 @@ def restore_archive(archive: Path, dest_root: Optional[Path] = None,
     staging = Path(config.OUTPUT_DIR) / f".restore_{int(time.time())}"
     staging.mkdir(parents=True, exist_ok=True)
     try:
+        enc = _archive_is_encrypted(str(archive))
         with zipfile.ZipFile(str(archive), "r") as zf:
             entries = [i for i in zf.infolist() if not i.is_dir()]
             _validate_entries([i.filename for i in entries], ROOT_KEY)
-            zf.extractall(str(staging))
+            if enc:
+                pw = _resolve_passphrase(passphrase)
+                if not pw:
+                    raise RestoreError(
+                        f"Archive is encrypted but no passphrase was provided. "
+                        f"Set the {PASSPHRASE_ENV} env var (or pass --passphrase)."
+                    )
+                with pyzipper.AESZipFile(str(archive), "r") as zf:
+                    zf.setpassword(pw)
+                    entries = [i for i in zf.infolist() if not i.is_dir()]
+                    _validate_entries([i.filename for i in entries], ROOT_KEY)
+                    zf.extractall(str(staging))
+            else:
+                zf.extractall(str(staging))
 
         root_dir = staging / ROOT_KEY
         if not root_dir.exists():
@@ -527,7 +639,7 @@ def restore_archive(archive: Path, dest_root: Optional[Path] = None,
         except Exception:  # noqa: BLE001
             raise RestoreError("Archive is missing/unreadable backup-manifest.json")
 
-        # #7: reject future/unknown format versions.
+        # Reject future/unknown format versions.
         version = manifest.get("format_version")
         if version is None:
             raise RestoreError("Archive has no format_version; refusing to restore")
@@ -538,7 +650,7 @@ def restore_archive(archive: Path, dest_root: Optional[Path] = None,
                 f"you need a newer engine version to restore this backup."
             )
 
-        # #8: verify hashes before we touch the destination.
+        # Verify hashes before we touch the destination.
         _verify_integrity(staging, manifest)
 
         old_root = manifest.get("source_root")
@@ -551,7 +663,7 @@ def restore_archive(archive: Path, dest_root: Optional[Path] = None,
             if src.exists():
                 _merge_copy(src, dest_root / sub)
 
-        # #2 / #13: optionally reproduce the source config (idempotent).
+        # Optionally reproduce the source config (idempotent).
         # We no longer drop a stray snapshot into the engine root; the values are
         # applied directly to config.py when requested.
         if apply_config:

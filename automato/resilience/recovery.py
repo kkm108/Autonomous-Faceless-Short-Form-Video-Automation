@@ -179,13 +179,21 @@ def _attempt(page, description: str, failed_selectors: List[str],
 
 
 def attempt_recover(page, description: str, failed_selectors: List[str],
-                    group_name: Optional[str] = None, locs=None) -> bool:
+                    group_name: Optional[str] = None, locs=None,
+                    enabled: Optional[bool] = None) -> bool:
     """Ask the LLM which clickable element to click, do it, and learn on success.
 
     Returns True if a candidate was clicked successfully. Does NOT re-raise the
     original failure; callers continue/crash as they see fit.
+
+    ``enabled`` (R2-W2/R2-F2) carries the run's recovery decision from settings;
+    when None the config module default applies.
     """
-    if not config.RECOVERY_ENABLED:
+    if enabled is not None:
+        active = enabled
+    else:
+        active = config.RECOVERY_ENABLED
+    if not active:
         return False
     candidates = _enumerate_clickables(page)
     if not candidates:
