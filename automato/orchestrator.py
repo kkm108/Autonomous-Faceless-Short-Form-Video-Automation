@@ -202,21 +202,22 @@ def run_workflow(workflow_name: str, seed: Dict[str, Any],
     from .run_guard import _lock_file, _pid_my_own, _read_lock, run_lock
 
     existing = _read_lock(_lock_file(config.OUTPUT_DIR))
+    lock_manager: Optional[Any] = None
+    guard: Optional[Any] = None
     if existing is not None and _pid_my_own(existing):
         # We are inside an already-locked process (e.g. tests calling
         # run_workflow twice). Keep going; the outer lock owner refreshes.
-        guard = None
         log.debug("run.lock already owned by this process; skipping re-acquire")
     else:
-        guard = run_lock(config.OUTPUT_DIR)
-        guard.__enter__()
+        lock_manager = run_lock(config.OUTPUT_DIR)
+        guard = lock_manager.__enter__()
 
     try:
         return _run_workflow_locked(workflow_name, seed, resume_run_id, settings,
                                     guard)
     finally:
-        if guard is not None:
-            guard.__exit__(None, None, None)
+        if lock_manager is not None:
+            lock_manager.__exit__(None, None, None)
 
 
 def _run_workflow_locked(workflow_name: str, seed: Dict[str, Any],

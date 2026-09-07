@@ -78,3 +78,25 @@ def test_default_stale_threshold_from_config():
     assert config.RUN_LOCK_STALE_S > 0
     assert _is_stale(_stale_entry(config.RUN_LOCK_STALE_S), stale_s=None) is True
     assert _is_stale(_stale_entry(config.RUN_LOCK_STALE_S / 2), stale_s=None) is False
+
+
+def test_run_workflow_heartbeats_lock_handle_and_releases(tmp_path, monkeypatch):
+    """Regression (R4): run_workflow must heartbeat the lock *handle* run_lock
+    yields, not the generator context-manager wrapper (which lacks heartbeat),
+    and must release the lock when done. The old code crashed the CLI's very
+    first run with `_GeneratorContextManager has no attribute 'heartbeat'`."""
+    import automato.orchestrator as orch
+
+    monkeypatch.setattr(orch.config, "OUTPUT_DIR", tmp_path)
+    marker = {}
+
+    def fake_locked(workflow_name, seed, resume_run_id, settings, guard):
+        guard.heartbeat()  # the exact call that used to crash
+        marker["locked"] = True
+        return marker
+
+    monkeypatch.setattr(orch, "_run_workflow_locked", fake_locked)
+    out = orch.run_workflow("faceless_short", {"topic": "t"}, settings=None)
+    assert out is marker
+    assert marker["locked"] is True
+    assert not (tmp_path / "run.lock").exists()  # released on exit
