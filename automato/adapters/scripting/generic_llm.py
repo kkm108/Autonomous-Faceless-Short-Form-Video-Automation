@@ -126,25 +126,16 @@ def _ai_studio_ask(page, ux, locs, prompt_text: str) -> Optional[dict]:
     else:
         box.press("Enter")
 
-    last = ""
-    deadline = time.time() + config.GENERIC_LLM_POLL_DEADLINE_S
-    while time.time() < deadline:
-        time.sleep(3)
-        cur = ""
-        for sel in AI_STUDIO_LOCS["model_message"]:
-            try:
-                loc = page.locator(sel).last
-                if loc.count() > 0:
-                    cur = loc.inner_text(timeout=3000) or ""
-                    break
-            except Exception:  # noqa: BLE001
-                continue
-        if cur:
-            last = cur
-        parsed = _parse_script(last, "")
-        if parsed is not None and _is_full_script(last):
-            return parsed
-    return _parse_script(last, "")
+    # Snapshot body text before sending; the reply arrives as text appended
+    # after this anchor, so the exact same settle-detection as duck.ai applies.
+    # Reuses the shared wait_for_completion() instead of a bespoke loop.
+    try:
+        anchor = page.locator("body").inner_text(timeout=6000) or ""
+    except Exception:  # noqa: BLE001
+        anchor = ""
+    reply = browser_chat.wait_for_completion(
+        page, len(anchor), timeout_s=config.GENERIC_LLM_POLL_DEADLINE_S)
+    return _parse_script(reply, "")
 
 
 def _is_full_script(text: str) -> bool:

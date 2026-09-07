@@ -11,9 +11,13 @@ def test_norm_unifies_separators():
 
 
 def test_rebind_replaces_root():
+    import os
+    expected = "D:/new/engine"
+    if os.sep == "\\":
+        expected = expected.replace("/", "\\")
     out, changed = bk._rebind(r"C:\old\engine", r"C:\old\engine", r"D:\new\engine")
     assert changed is True
-    assert "D:\\new\\engine" in out
+    assert expected in out
 
 
 def test_rebind_no_change_when_root_absent():

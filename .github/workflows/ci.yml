@@ -28,6 +28,18 @@ jobs:
       - name: Lint
         run: ruff check automato tests
 
+      - name: Guard against profile/backup/archive commits (R4-F1)
+        run: |
+          set -eu
+          now=$(git ls-files | grep -E '^(backups|profiles)/|\.zip$' || true)
+          hist=$(git log --all --diff-filter=A --name-only --pretty=format: \
+            | grep -E '^(backups|profiles)/|\.zip$' || true)
+          if [ -n "$now$hist" ]; then
+            echo "Forbidden files in tree:";    [ -z "$now" ]  || echo "$now"
+            echo "Forbidden files in history:"; [ -z "$hist" ] || echo "$hist"
+            exit 1
+          fi
+
       - name: Pure-logic tests (no browser)
         run: pytest -q
 

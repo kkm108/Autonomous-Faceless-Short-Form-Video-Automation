@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "automato"
 version = "0.1.0"
 description = "Autonomous faceless short-form video automation (browser-driven)"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

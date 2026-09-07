@@ -99,8 +99,6 @@ def wait_for_completion(page, anchor_len: int, timeout_s: int = 220,
                 continue  # keep waiting; model is still streaming
         if unchanged >= 2:
             break
-        if unchanged >= 6:
-            break
     return last.strip()
 
 

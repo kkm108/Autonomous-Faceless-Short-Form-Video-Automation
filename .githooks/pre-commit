@@ -1,0 +1,31 @@
+#!/bin/sh
+# Reject staging of backup archives, browser profiles, zips, or large blobs
+# (R4-F1). Git's .gitignore only stops unthinking `git add .`; this hook also
+# catches `git add -f`, so session/profile data cannot slip back into history.
+#
+# Enable with:  git config core.hooksPath .githooks
+# CI (.github/workflows/ci.yml) enforces the same rules at push time, so a
+# --no-verify commit here still gets caught upstream.
+set -u
+
+MAX_BYTES=5242880  # 5 MiB
+
+bad=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)(backups|profiles)(/|$)|\.zip$' || true)
+if [ -n "$bad" ]; then
+    echo "Forbidden paths staged (backups/profiles/*.zip):"
+    printf '%s\n' "$bad"
+    echo "Refusing to commit. Unstage them with 'git rm --cached'."
+    exit 1
+fi
+
+too_big=$(git ls-files -s | while read -r mode blob stage path; do
+    size=$(git cat-file -s "$blob" 2>/dev/null || echo 0)
+    [ "$size" -gt "$MAX_BYTES" ] && printf '%s (%s bytes)\n' "$path" "$size"
+done)
+if [ -n "$too_big" ]; then
+    echo "Oversized staged blobs (>5 MB - possible committed artifact):"
+    printf '%s\n' "$too_big"
+    exit 1
+fi
+
+exit 0
