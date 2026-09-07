@@ -138,16 +138,6 @@ def _ai_studio_ask(page, ux, locs, prompt_text: str) -> Optional[dict]:
     return _parse_script(reply, "")
 
 
-def _is_full_script(text: str) -> bool:
-    """True only when a *standalone* END delimiter line is present and the reply
-    has settled. R2-W6: previously any ``"END"`` substring (e.g. "...will end
-    soon") terminated the loop early; now we require a whole-line delimiter."""
-    for line in text.splitlines():
-        if line.strip().upper() == "END":
-            return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 # adapter entry --------------------------------------------------------------
 # ---------------------------------------------------------------------------

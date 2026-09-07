@@ -46,6 +46,15 @@ Resilience is bundled in `automato/resilience/`:
   pip install -r requirements.txt
   ```
 
+Enable the pre-commit guard (blocks committing `profiles/`, `backups/`, or any
+archive that might carry live sessions):
+  ```powershell
+  git config core.hooksPath .githooks
+  ```
+  ```bash
+  git config core.hooksPath .githooks
+  ```
+
 ## Usage
 
 ### 1. One-time login (only the providers that need an account)
