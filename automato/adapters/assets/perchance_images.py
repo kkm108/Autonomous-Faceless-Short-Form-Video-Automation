@@ -66,6 +66,15 @@ def _hash_of(b64: str) -> str:
     return hashlib.sha256(b64.encode()).hexdigest()[:16]
 
 
+def _should_downgrade_scoped(seen_scoped_this_prompt: bool, elapsed_s: float,
+                             in_flight_s: float) -> bool:
+    """Whether an empty scoped read means the site shifted (downgrade) versus
+    just an in-flight generation (keep polling scoped). R5: the generator
+    clears its canvas while rendering, so an empty read inside the normal
+    in-flight window must NOT count as a markup change."""
+    return seen_scoped_this_prompt or elapsed_s >= in_flight_s
+
+
 def _collect_snapshot(page, gen) -> FrameSnap:
     """Snapshot images **only in embed frames under the generator frame**, in DOM
     order. Each generation owns its embed frame, so this is the container-scoped
@@ -181,25 +190,36 @@ def run(ctx, inputs, run_dir, session):
         generate = gen.locator(GENERATE_SELECTOR).first
         ux.click(generate, description="perchance generate")
 
-        # wait for the specific generation's container (embed frame) to turn up
+# wait for the specific generation's container (embed frame) to turn up
         # new images; scoped correlation first, page-wide diff only as fallback.
+        # The generator clears its canvas as soon as a new prompt starts, so the
+        # scoped collection legitimately reads EMPTY for the whole ~30s the next
+        # image is rendering. Treating any empty read as "markup shifted" caused
+        # every prompt to bail to the page-wide fallback instantly (R5). Only
+        # downgrade once the scoped view has stayed empty well past the normal
+        # in-flight window (or previously held images and then lost them).
         got: Optional[Dict[str, str]] = None
         t0 = time.time()
+        in_flight_s = config.PERCHANCE_MAX_PER_IMAGE_S // 2
+        seen_scoped_this_prompt = False
         while time.time() - t0 < config.PERCHANCE_MAX_PER_IMAGE_S:
             time.sleep(config.PERCHANCE_POLL_INTERVAL_S)
             if scoped_ok:
                 cur = _collect_snapshot(page, gen)
                 if not cur:
-                    # Scoped scan suddenly found nothing (markup shifted): refuse
-                    # to silently correlate nothing and fall back for the rest.
+                    if not _should_downgrade_scoped(
+                            seen_scoped_this_prompt, time.time() - t0, in_flight_s):
+                        # plain in-flight window; keep polling the scoped view
+                        continue
                     log.warning("Generation-scoped image collection vanished "
                                 "mid-run; falling back to page-wide diff")
                     scoped_ok = False
                     before = _collect_finished_images(page)
                     continue
+                seen_scoped_this_prompt = True
                 new_hashes, _key = _pick_newest_correlated(before, cur)
                 if new_hashes:
-                    by_hash = {h: b64 for _key2, items in cur for h, b64 in items}
+                    by_hash = {h: b64 for _k2, items in cur for h, b64 in items}
                     got = {h: by_hash[h] for h in new_hashes}
                     break
                 before = cur

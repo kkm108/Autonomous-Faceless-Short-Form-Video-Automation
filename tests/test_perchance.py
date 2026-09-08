@@ -1,5 +1,9 @@
 """R2-W5: pure-logic tests for Perchance prompt/image DOM-container correlation."""
-from automato.adapters.assets.perchance_images import _pick_newest_correlated
+
+from automato.adapters.assets.perchance_images import (
+    _pick_newest_correlated,
+    _should_downgrade_scoped,
+)
 
 
 def snap(*frames):
@@ -46,3 +50,24 @@ def test_new_variant_in_first_frame_when_second_unchanged():
     cur = snap(("0:u", [("a", "A"), ("b", "B")]), ("1:u", [("p", "P")]))
     hashes, key = _pick_newest_correlated(prev, cur)
     assert key == "0:u" and hashes == ["b"]
+
+
+def test_empty_scoped_inside_in_flight_window_does_not_downgrade():
+    # R5 regression: Perchance clears its canvas between prompts, so immediately
+    # after generation the scoped view is legitimately empty for ~30s. Absent any
+    # successful scoped read this prompt and inside the in-flight window, an empty
+    # snapshot must keep polling scoped -- NOT bail to the page-wide fallback
+    # (which previously fired on every single prompt).
+    assert _should_downgrade_scoped(False, elapsed_s=5, in_flight_s=75) is False
+    assert _should_downgrade_scoped(False, elapsed_s=40, in_flight_s=75) is False
+
+
+def test_empty_scoped_past_in_flight_window_means_site_shift():
+    assert _should_downgrade_scoped(False, elapsed_s=76, in_flight_s=75) is True
+    assert _should_downgrade_scoped(False, elapsed_s=150, in_flight_s=75) is True
+
+
+def test_scoped_images_seen_then_lost_downgrades_immediately():
+    # We SAW generation-scoped frames with images this prompt, and now zero remain:
+    # that is a real mid-run markup shift, not an in-flight window.
+    assert _should_downgrade_scoped(True, elapsed_s=3, in_flight_s=75) is True
