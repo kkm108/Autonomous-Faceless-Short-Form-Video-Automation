@@ -208,16 +208,15 @@ def run(ctx, inputs, run_dir, session=None):
     concat_mp4 = run_dir / "_concat.mp4"
     final = run_dir / inputs["video"]
 
-    # 1) concat slides into a sequence preserving each slide for `segment` seconds
+    # 1) concat slides into a sequence preserving each slide for `segment` seconds.
+    # Slides are already rendered at exactly WxH (1080x1920) by _render_slide, so
+    # the old per-input scale+letterbox pad is unnecessary (R6) — just keep the
+    # sample aspect sane.
     cmd_concat = [
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0", "-i", str(list_file),
         "-fps_mode", "cfr", "-r", str(FPS),
-        "-vf", (
-            f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,"
-            f"setsar=1"
-        ),
+        "-vf", "setsar=1",
         "-t", f"{duration:.3f}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p",

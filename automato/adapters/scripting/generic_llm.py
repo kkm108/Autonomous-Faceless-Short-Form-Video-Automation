@@ -1,12 +1,9 @@
 """Generic LLM scripting adapter (browser-driven, multi-provider).
 
-Fully browser-automated. Two free providers so the pipeline runs without
-interruption:
-
-  * ``ai_studio`` (user's preferred provider) — Google AI Studio web UI (needs a
-    signed-in Google session; auto-falls back if not logged in).
-  * ``duckai`` (duck.ai) — DuckDuckGo AI Chat, free, **no signup required**, so the
-    scripting stage completes autonomously without any account.
+Fully browser-automated. The user's preferred provider runs first; if it is not
+signed in or fails, a chain of free **no-login** web chat UIs is tried in order:
+duck.ai -> Ask Brave -> Gemini (guest) -> ChatGPT (guest), so the scripting stage
+completes autonomously without any account (R6).
 
 The model is asked for a simple delimited plain-text script (see script_prompts),
 which we parse robustly locally. This is far more reliable with small web models
@@ -22,6 +19,7 @@ from typing import Optional
 
 from ... import config
 from ...llm import chat as browser_chat
+from ...llm import no_login
 from ...llm.script_prompts import SYS_PREAMBLE, build_user_prompt
 
 log = logging.getLogger(__name__)
@@ -53,12 +51,6 @@ AI_STUDIO_LOCS = {
 # ---------------------------------------------------------------------------
 # duck.ai (no login) ---------------------------------------------------------
 # ---------------------------------------------------------------------------
-def _duckai_ask(page, topic: str) -> Optional[dict]:
-    prompt_text = f"{SYS_PREAMBLE}\n\n{build_user_prompt(topic)}"
-    reply = browser_chat.ask(page, prompt_text)
-    return _parse_script(reply, topic)
-
-
 _KEY_RE = re.compile(r"^\s*(TITLE|NARRATION|CAPTION|IMAGE)\s*\|\s*(.*)\s*$")
 
 
@@ -141,6 +133,36 @@ def _ai_studio_ask(page, ux, locs, prompt_text: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 # adapter entry --------------------------------------------------------------
 # ---------------------------------------------------------------------------
+def _provider_sequence(preferred: str) -> list:
+    """Ordered provider attempts for scripting: the user's preferred provider
+    first, then the configured no-login fallback chain (deduped)."""
+    no_login_providers = [p for p in config.LLM_NO_LOGIN_CHAIN if p]
+    if preferred == "ai_studio":
+        return ["ai_studio", *no_login_providers]
+    if preferred in no_login_providers:
+        return [preferred, *(p for p in no_login_providers if p != preferred)]
+    log.warning("Unknown llm_provider %r; using ai_studio + no-login chain",
+                preferred)
+    return ["ai_studio", *no_login_providers]
+
+
+def _ask_no_login(page, provider: str, prompt_text: str) -> Optional[dict]:
+    if provider == "duckai":
+        reply = browser_chat.ask(page, prompt_text)
+    elif provider == "ask_brave":
+        reply = no_login.ask_brave(page, prompt_text)
+    elif provider == "gemini":
+        reply = no_login.ask_gemini(page, prompt_text)
+    elif provider == "chatgpt":
+        reply = no_login.ask_chatgpt(page, prompt_text)
+    else:
+        log.warning("Skipping unknown no-login provider %r", provider)
+        return None
+    if not reply:
+        return None
+    return _parse_script(reply, "")
+
+
 def run(ctx, inputs, run_dir, session):
     topic = str(inputs.get("topic", "")).strip()
     if not topic:
@@ -153,27 +175,30 @@ def run(ctx, inputs, run_dir, session):
     ux = ElementInteractor(page, provider="ai_studio", settings=ctx.settings)
     locs = ProviderLocations(AI_STUDIO_LOCS)
     preferred = ctx.settings.llm_provider or "ai_studio"
+    providers = _provider_sequence(preferred)
+    prompt_text = f"{SYS_PREAMBLE}\n\n{build_user_prompt(topic)}"
 
     script = None
-    if preferred == "ai_studio":
-        try:
-            script = _ai_studio_ask(page, ux, locs,
-                                    f"{SYS_PREAMBLE}\n\n{build_user_prompt(topic)}")
-        except Exception as exc:  # noqa: BLE001
-            log.warning("AI Studio scripting failed (%s); trying duck.ai", exc)
-
-    if script is None:
-        # duck.ai with retries (fresh chat each attempt)
-        for attempt in (1, 2, 3):
+    for provider in providers:
+        attempts = 3 if provider == "duckai" else 2
+        for attempt in range(1, attempts + 1):
             try:
-                script = _duckai_ask(page, topic)
+                if provider == "ai_studio":
+                    script = _ai_studio_ask(page, ux, locs, prompt_text)
+                else:
+                    script = _ask_no_login(page, provider, prompt_text)
             except Exception as exc:  # noqa: BLE001
-                log.warning("Duck.ai attempt %d failed (%s)", attempt, exc)
+                log.warning("Provider '%s' attempt %d failed (%s)",
+                            provider, attempt, exc)
                 script = None
             if script is not None:
+                log.info("Script obtained via provider '%s'", provider)
                 break
-            log.warning("Duck.ai attempt %d produced no parseable script; retrying", attempt)
+            log.warning("Provider '%s' attempt %d produced no parseable script; "
+                        "retrying", provider, attempt)
             time.sleep(5)
+        if script is not None:
+            break
 
     if script is None:
         raise RuntimeError("Failed to obtain a script from the LLM")

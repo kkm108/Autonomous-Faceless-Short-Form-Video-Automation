@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import time
+from itertools import cycle
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -43,6 +44,10 @@ PROMPT_SELECTOR = "textarea[data-name='description']"
 GENERATE_SELECTOR = "button:has-text('generate')"
 # Finished images are inline data-URIs (there are no remote src results).
 IMG_SELECTOR = "img[src^='data:image']"
+# R6 native generator controls: Shape (768x768 Square / 512x768 Portrait /
+# 768x512 Landscape) and "How many" (batches that many variants per prompt).
+SHAPE_SELECTOR = "select[data-name='shape']"
+NUM_IMAGES_SELECTOR = "select[data-name='numImages']"
 
 # Ordered frame -> [(image hash, base64 payload)] captured beneath the generator
 # frame. Keys must be order-significant so "last frame with new images" works.
@@ -73,6 +78,38 @@ def _should_downgrade_scoped(seen_scoped_this_prompt: bool, elapsed_s: float,
     clears its canvas while rendering, so an empty read inside the normal
     in-flight window must NOT count as a markup change."""
     return seen_scoped_this_prompt or elapsed_s >= in_flight_s
+
+
+def _per_prompt_target(remaining: int, batch: int) -> int:
+    """How many finished variants one prompt should supply at most."""
+    return min(max(int(batch), 1), remaining)
+
+
+def _apply_generator_settings(gen) -> None:
+    """Switches the generator to the configured Shape/"How many" (R6).
+
+    ``select_option`` fires the native change event, which the plugin persists
+    for subsequent generates. Failures are non-fatal (site defaults remain).
+    """
+    shape = (config.PERCHANCE_SHAPE or "").strip()
+    if shape:
+        try:
+            loc = gen.locator(SHAPE_SELECTOR)
+            if loc.count() > 0:
+                loc.select_option(shape)
+                log.info("Perchance shape set to %r", shape)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not set Perchance shape=%r (%s)", shape, exc)
+    num_images = int(config.PERCHANCE_NUM_IMAGES or 0)
+    if num_images > 0:
+        try:
+            loc = gen.locator(NUM_IMAGES_SELECTOR)
+            if loc.count() > 0:
+                loc.select_option(str(num_images))
+                log.info("Perchance numImages set to %d", num_images)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not set Perchance numImages=%d (%s)",
+                        num_images, exc)
 
 
 def _collect_snapshot(page, gen) -> FrameSnap:
@@ -161,9 +198,8 @@ def run(ctx, inputs, run_dir, session):
     script = json.loads(script_path.read_text(encoding="utf-8"))
     image_count = int(inputs.get("image_count", 6))
     prompts = script.get("image_prompts", []) or []
-    if len(prompts) < image_count:
-        prompts = (prompts * ((image_count // max(1, len(prompts))) + 1))[:image_count]
-    prompts = prompts[:image_count]
+    if not prompts:
+        raise RuntimeError("Script has no image prompts for Perchance assets")
 
     page = session.first_page()
     from ...resilience.interaction import ElementInteractor
@@ -172,12 +208,18 @@ def run(ctx, inputs, run_dir, session):
     ux.goto(GENERATOR_URL, wait_until="domcontentloaded")
     time.sleep(config.PERCHANCE_SETTLE_S)  # let the generator iframe + UI finish loading
     _generator_frame(page)
+    _apply_generator_settings(_generator_frame(page))
 
     assets_dir = run_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     saved: list = []
+    batch = int(config.PERCHANCE_NUM_IMAGES or 1)
+    remaining = image_count
+    prompt_iter = cycle(prompts)
 
-    for idx, prompt in enumerate(prompts):
+    while remaining > 0:
+        prompt = next(prompt_iter)
+        target = _per_prompt_target(remaining, batch)
         gen = _generator_frame(page)
         before = _collect_snapshot(page, gen)
         scoped_ok = bool(before)
@@ -190,7 +232,7 @@ def run(ctx, inputs, run_dir, session):
         generate = gen.locator(GENERATE_SELECTOR).first
         ux.click(generate, description="perchance generate")
 
-# wait for the specific generation's container (embed frame) to turn up
+        # wait for the specific generation's container (embed frame) to turn up
         # new images; scoped correlation first, page-wide diff only as fallback.
         # The generator clears its canvas as soon as a new prompt starts, so the
         # scoped collection legitimately reads EMPTY for the whole ~30s the next
@@ -198,7 +240,9 @@ def run(ctx, inputs, run_dir, session):
         # every prompt to bail to the page-wide fallback instantly (R5). Only
         # downgrade once the scoped view has stayed empty well past the normal
         # in-flight window (or previously held images and then lost them).
-        got: Optional[Dict[str, str]] = None
+        # R6 batch: keep polling until this prompt's variant target is met —
+        # a single poll can legitimately yield more than one finished image.
+        collected: Dict[str, str] = {}
         t0 = time.time()
         in_flight_s = config.PERCHANCE_MAX_PER_IMAGE_S // 2
         seen_scoped_this_prompt = False
@@ -220,32 +264,38 @@ def run(ctx, inputs, run_dir, session):
                 new_hashes, _key = _pick_newest_correlated(before, cur)
                 if new_hashes:
                     by_hash = {h: b64 for _k2, items in cur for h, b64 in items}
-                    got = {h: by_hash[h] for h in new_hashes}
-                    break
+                    collected.update({h: by_hash[h] for h in new_hashes
+                                      if h in by_hash})
+                    if len(collected) >= target:
+                        break
                 before = cur
             else:
                 cur = _collect_finished_images(page)
                 new_keys = [k for k in cur if k not in before]
                 if new_keys:
-                    got = {k: cur[k] for k in new_keys}
-                    break
+                    collected.update({k: cur[k] for k in new_keys})
+                    if len(collected) >= target:
+                        break
                 before = set(cur)
 
-        if not got:
-            log.warning("No finished image captured for prompt %d; skipping", idx)
+        if not collected:
+            log.warning("No finished image captured for prompt %r; "
+                        "moving to next prompt", prompt)
             continue
 
-        # save the first (deterministic DOM order) finished image of THIS prompt
-        key = list(got.keys())[0]
-        b64 = got[key]
-        data = _decode(b64, idx)
-        if data is None:
-            continue
-        fname = assets_dir / f"bg_{idx:02d}.jpg"
-        fname.write_bytes(data)
-        saved.append(str(fname))
-        log.info("Saved asset %d -> %s (%d bytes; %d variant(s) for prompt)",
-                 idx, fname.name, len(data), len(got))
+        # save every new variant of THIS prompt (batch mode), up to what's left
+        for b64 in collected.values():
+            if remaining <= 0:
+                break
+            data = _decode(b64, len(saved))
+            if data is None:
+                continue
+            fname = assets_dir / f"bg_{len(saved):02d}.jpg"
+            fname.write_bytes(data)
+            saved.append(str(fname))
+            remaining -= 1
+            log.info("Saved asset %d -> %s (%d bytes)", len(saved),
+                     fname.name, len(data))
         time.sleep(config.PERCHANCE_UI_SETTLE_S)
 
     if not saved:

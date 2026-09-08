@@ -71,3 +71,14 @@ def test_scoped_images_seen_then_lost_downgrades_immediately():
     # We SAW generation-scoped frames with images this prompt, and now zero remain:
     # that is a real mid-run markup shift, not an in-flight window.
     assert _should_downgrade_scoped(True, elapsed_s=3, in_flight_s=75) is True
+
+
+def test_per_prompt_target_respects_remaining_budget():
+    # R6 batch: "How many" may ask for 4 variants but we should never overshoot
+    # the image_count remainder.
+    from automato.adapters.assets.perchance_images import _per_prompt_target
+
+    assert _per_prompt_target(6, 4) == 4
+    assert _per_prompt_target(2, 4) == 2
+    assert _per_prompt_target(6, 1) == 1
+    assert _per_prompt_target(6, 0) == 1  # disabled config degrades to single

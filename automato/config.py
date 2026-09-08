@@ -123,12 +123,33 @@ DEFAULT_WORKFLOW = "faceless_short"
 DEFAULT_VISIBILITY = "unlisted"      # unlisted, private, public
 
 # Scripting LLM provider ("ai_studio" is the user's preferred; the adapter falls
-# back to "duckai", which needs no login, when AI Studio isn't signed in).
+# back to the no-login chain when AI Studio isn't signed in).
 LLM_PROVIDER = "ai_studio"
+
+# No-login LLM fallback chain (R6): tried in order after the user's preferred
+# provider. All are login-free web chat UIs: duck.ai, Ask Brave, Gemini (guest,
+# base Flash), and ChatGPT (guest, region-gated, last resort). Runtime failures
+# fall through to the next entry. Override with
+# AUTOMATO_LLM_NO_LOGIN_CHAIN="duckai,geminiai,..."
+_LLM_CHAIN_ENV = os.environ.get("AUTOMATO_LLM_NO_LOGIN_CHAIN", "").strip()
+LLM_NO_LOGIN_CHAIN = (
+    [p.strip() for p in _LLM_CHAIN_ENV.split(",") if p.strip()]
+    if _LLM_CHAIN_ENV
+    else ["duckai", "ask_brave", "gemini", "chatgpt"]
+)
 
 # TTS strategy. "auto" tries the browser web tool (SoundTools) then edge-tts then
 # pyttsx3 on failure. You can force one: "soundtools" | "edge_tts" | "pyttsx3".
 TTS_PROVIDER = "auto"
+
+# Language-aware routing (R6): classical-verse/chant Sanskrit (`sa`) may route to
+# the online vagdhenu (IISc) engine, but that adapter is opt-in and not yet
+# wired; enabling only slots it ahead of the local chain. General speech always
+# stays on the local chain. Override with AUTOMATO_VAGDHENU_ENABLED=1.
+VAGDHENU_ENABLED = (
+    os.environ.get("AUTOMATO_VAGDHENU_ENABLED", "").strip().lower()
+    in ("1", "true", "yes")
+)
 # Bounded wait for the browser TTS tool before falling back (seconds).
 TTS_BROWSER_TIMEOUT_S = 120
 # edge-tts voice (high-quality neural voice used by Microsoft Edge read-aloud).
@@ -147,6 +168,12 @@ PERCHANCE_SETTLE_S = 12               # generator iframe/UI settle after navigat
 PERCHANCE_UI_SETTLE_S = 3             # settle between saved generations
 PERCHANCE_MAX_PER_IMAGE_S = 150       # per-generation hard deadline
 PERCHANCE_POLL_INTERVAL_S = 5
+# R6 batch controls: the generator's native Shape/"How many" selects. Shape
+# "512x768" = Portrait (native 2:3, ideal for vertical videos) and numImages
+# batches that many variants of a single prompt in parallel. Set shape to "" or
+# numImages to 0 to leave the site defaults alone.
+PERCHANCE_SHAPE = os.environ.get("AUTOMATO_PERCHANCE_SHAPE", "512x768")
+PERCHANCE_NUM_IMAGES = int(os.environ.get("AUTOMATO_PERCHANCE_NUM_IMAGES", "4") or 0)
 # youtube_studio
 YOUTUBE_UI_SETTLE_S = 3               # post-navigation settle
 YOUTUBE_POST_CLICK_SLEEP_S = 2        # micro-settle between workflow steps

@@ -163,11 +163,9 @@ def run(ctx, inputs, run_dir, session=None):
         raise ValueError("No spoken_script in script for TTS stage")
 
     provider = (ctx.settings.tts_provider or "auto").strip().lower()
-    chain = []
-    if provider == "auto":
-        chain = ["soundtools", "edge_tts", "pyttsx3"]
-    else:
-        chain = [provider]
+    from .routing import build_tts_chain
+
+    chain = build_tts_chain(text, provider)
 
     page = None
     if session is not None:
@@ -188,6 +186,13 @@ def run(ctx, inputs, run_dir, session=None):
                 path = _edge_tts(text, run_dir)
             elif method == "pyttsx3":
                 path = _pyttsx3(text, run_dir)
+            elif method == "vagdhenu":
+                if not config.VAGDHENU_ENABLED:
+                    raise RuntimeError(
+                        "Vagdhenu route disabled (AUTOMATO_VAGDHENU_ENABLED=1)")
+                raise RuntimeError(
+                    "Vagdhenu adapter is not yet wired; no Sanskrit content "
+                    "in the pipeline")
             else:
                 raise ValueError(f"Unknown TTS provider: {method}")
             return {"audio": str(path)}
