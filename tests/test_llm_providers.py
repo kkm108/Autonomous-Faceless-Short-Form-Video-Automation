@@ -54,3 +54,94 @@ def test_chained_drivers_expose_identical_signatures():
     for name in ("ask_brave", "ask_gemini", "ask_chatgpt"):
         fn = getattr(no_login, name)
         assert fn.__code__.co_argcount <= 2  # (page, prompt) or fewer
+
+
+class _FakeBox:
+    """Scripted playwright locator stub for _type_into's input path."""
+
+    def __init__(self, contenteditable, echo_fill=True):
+        self._ce = contenteditable or ""
+        self._echo_fill = echo_fill
+        self._text = ""
+        self.calls = []
+
+    def get_attribute(self, name):
+        return self._ce if name == "contenteditable" else None
+
+    def click(self, *args, **kwargs):
+        self.calls.append(("click",))
+
+    def press_sequentially(self, text, **kwargs):
+        self.calls.append(("press_sequentially", text))
+
+    def fill(self, text, **kwargs):
+        self._text = text if self._echo_fill else ""
+        self.calls.append(("fill", text))
+
+    def inner_text(self, **kwargs):
+        return self._text
+
+
+def test_contenteditable_typed_fallback_never_types_newlines():
+    # R6 regression: Gemini's Quill editor submits on Enter, and
+    # press_sequentially maps a literal \n to an Enter keypress. When the editor
+    # ignores fill() and we must type, a multi-line prompt would fragment into
+    # several premature sends. The typed fallback must collapse newlines.
+    from automato.llm.no_login import _type_into
+
+    box = _FakeBox("true", echo_fill=False)
+    _type_into(object(), box, "TITLE | Hello\nNARRATION | world\n\nEND")
+    typed = [text for kind, text in (c for c in box.calls if len(c) == 2)
+             if kind == "press_sequentially"]
+    assert typed
+    assert all("\n" not in t and "\r" not in t for t in typed)
+    assert "TITLE | Hello NARRATION | world  END" in typed  # words stay separated
+
+
+def test_contenteditable_fill_path_preserves_newlines():
+    # When the editor accepts fill(), the value is set atomically (no keystrokes,
+    # so no Enter-key sends) and the prompt's line structure is kept intact for
+    # the model's delimited format — no typed fallback occurs.
+    from automato.llm.no_login import _type_into
+
+    box = _FakeBox("true")
+    _type_into(object(), box, "TITLE | Hello\nNARRATION | world\n\nEND")
+    kinds = [kind for kind, *_ in box.calls]
+    fills = [text for kind, text in (c for c in box.calls if len(c) == 2)
+             if kind == "fill"]
+    assert "press_sequentially" not in kinds
+    assert fills == ["TITLE | Hello\nNARRATION | world\n\nEND"]
+
+
+def test_textarea_path_preserves_newlines():
+    # Non-contenteditable boxes take fill() directly, where literal newlines are
+    # safe (no keystrokes fired) and must be preserved for the model's format.
+    from automato.llm.no_login import _type_into
+
+    box = _FakeBox("")
+    _type_into(object(), box, "TITLE | Hello\nNARRATION | world\n\nEND")
+    fills = [text for kind, text in (c for c in box.calls if len(c) == 2)
+             if kind == "fill"]
+    assert fills == ["TITLE | Hello\nNARRATION | world\n\nEND"]
+
+
+def test_extract_last_gemini_reply_single_turn():
+    from automato.llm.no_login import _extract_last_gemini_reply
+
+    body = ("Conversation with Gemini\nYou said\nTITLE | hi\n\n"
+            "Gemini said\nNARRATION | hello there\n\nFlash-Lite")
+    assert _extract_last_gemini_reply(body) == "NARRATION | hello there\n\nFlash-Lite"
+
+
+def test_extract_last_gemini_reply_prefers_latest_turn():
+    from automato.llm.no_login import _extract_last_gemini_reply
+
+    body = ("You said\nq one\nGemini said\nanswer one\n\n"
+            "You said\nq two\nGemini said\nNARRATION | final answer\nEND")
+    assert _extract_last_gemini_reply(body) == "NARRATION | final answer\nEND"
+
+
+def test_extract_last_gemini_reply_no_label():
+    from automato.llm.no_login import _extract_last_gemini_reply
+
+    assert _extract_last_gemini_reply("no turn labels here") == ""
