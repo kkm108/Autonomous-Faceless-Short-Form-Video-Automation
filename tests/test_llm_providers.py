@@ -125,23 +125,93 @@ def test_textarea_path_preserves_newlines():
     assert fills == ["TITLE | Hello\nNARRATION | world\n\nEND"]
 
 
-def test_extract_last_gemini_reply_single_turn():
-    from automato.llm.no_login import _extract_last_gemini_reply
+def test_extract_last_turn_single():
+    from automato.llm.no_login import _extract_last_turn
 
     body = ("Conversation with Gemini\nYou said\nTITLE | hi\n\n"
             "Gemini said\nNARRATION | hello there\n\nFlash-Lite")
-    assert _extract_last_gemini_reply(body) == "NARRATION | hello there\n\nFlash-Lite"
+    out = _extract_last_turn(body, "Gemini said", "You said")
+    assert out == "NARRATION | hello there\n\nFlash-Lite"
 
 
-def test_extract_last_gemini_reply_prefers_latest_turn():
-    from automato.llm.no_login import _extract_last_gemini_reply
+def test_extract_last_turn_prefers_latest():
+    from automato.llm.no_login import _extract_last_turn
 
     body = ("You said\nq one\nGemini said\nanswer one\n\n"
             "You said\nq two\nGemini said\nNARRATION | final answer\nEND")
-    assert _extract_last_gemini_reply(body) == "NARRATION | final answer\nEND"
+    out = _extract_last_turn(body, "Gemini said", "You said")
+    assert out == "NARRATION | final answer\nEND"
 
 
-def test_extract_last_gemini_reply_no_label():
-    from automato.llm.no_login import _extract_last_gemini_reply
+def test_extract_last_turn_no_label_uses_fallback():
+    from automato.llm.no_login import _extract_last_turn
 
-    assert _extract_last_gemini_reply("no turn labels here") == ""
+    body = "You said\nlegacy UI prompt\nreply continues here"
+    out = _extract_last_turn(body, "Gemini said", "You said")
+    assert out == "legacy UI prompt\nreply continues here"
+
+
+def test_extract_last_turn_neither_label():
+    from automato.llm.no_login import _extract_last_turn
+
+    assert _extract_last_turn("no turn labels here", "Gemini said", "") == ""
+
+
+def test_extract_last_turn_chatgpt_label():
+    from automato.llm.no_login import _extract_last_turn
+
+    body = ("two benefits of morning sunlight is one short title / \n"
+            "ChatGPT said:\ntwo short lines and nothing else\nEND")
+    out = _extract_last_turn(body, "ChatGPT said:", "")
+    assert out.startswith("two short lines")
+    assert "END" in out
+
+
+def test_locate_last_echo_softwrapped():
+    # innerText adds soft-wrap newlines the source text doesn't have; the search
+    # is whitespace-normalized and must still land just past the echo.
+    from automato.llm.no_login import _locate_last_echo
+
+    tail = "TITLE| and caption relate to topic."
+    body = ("before\nyou said everything\n"
+            "TITLE| and cap\ntion relate to top\nic.\nGemini said\nNARRATION| done")
+    end = _locate_last_echo(body, tail)
+    assert end > 0
+    seg = body[end:].lstrip("\r\n \t")
+    assert seg.startswith("Gemini said")
+
+
+def test_locate_last_echo_picks_latest_echo():
+    from automato.llm.no_login import _locate_last_echo
+
+    tail = "same prompt tail"
+    body = ("You said\nsame prompt tail\nGemini said\nold answer\n\n"
+            "You said\nsame prompt tail\nGemini said\nnew answer")
+    end = _locate_last_echo(body, tail)
+    seg = body[end:].lstrip("\r\n \t")
+    assert seg.startswith("Gemini said")
+    assert "new answer" in seg and "old answer" not in seg
+
+
+def test_locate_last_echo_missing():
+    from automato.llm.no_login import _locate_last_echo
+
+    assert _locate_last_echo("no echo here", "some tail") == -1
+    assert _locate_last_echo("", "tail") == -1
+
+
+def test_extract_current_reply_gemini_and_chatgpt():
+    from automato.llm.no_login import _extract_current_reply
+
+    tail = "caption must clearly relate to morning sunlight."
+    gem_body = ("You said\nother stuff\n"
+                "TITLE| x\ncaption must clearly relate to morning sunlight.\n"
+                "Gemini said\nNARRATION| hello world\nEND")
+    out = _extract_current_reply(gem_body, "Gemini said", tail)
+    assert out == "NARRATION| hello world\nEND"
+
+    gpt_body = ("earlier\n"
+                "caption must clearly relate to morning sunlight.\n"
+                "ChatGPT said:\nNARRATION| aptly answered\nEND")
+    out = _extract_current_reply(gpt_body, "ChatGPT said:", tail)
+    assert out == "NARRATION| aptly answered\nEND"

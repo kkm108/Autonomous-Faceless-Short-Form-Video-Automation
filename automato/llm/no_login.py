@@ -21,6 +21,7 @@ snapshot ``body`` text, submit, then wait for the body to grow past that anchor
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from .. import config
@@ -117,33 +118,86 @@ def _fill_contenteditable(box, prompt: str) -> bool:
     return bool(got and probe_tail in got)
 
 
-def _extract_last_gemini_reply(body: str) -> str:
-    """Text of Gemini's *last* assistant turn from the conversation body.
-
-    Gemini mutates the DOM while rendering turns (composer lift-out, prompt
-    re-formatting), so a byte-length diff is unreliable there; we key on the
-    "Gemini said" turn label instead and take everything after the last one."""
-    idx = body.rfind("Gemini said")
+def _extract_last_turn(body: str, label: str, fallback: str = "") -> str:
+    """Text of the *last* turn labelled ``label`` (or ``fallback``), a fallback
+    used only when no prompt echo can be localized — see ``_extract_current_reply``."""
+    idx = body.rfind(label)
     if idx != -1:
-        return body[idx + len("Gemini said"):].strip()
-    idx = body.rfind("You said")
-    if idx != -1:
-        return body[idx + len("You said"):].strip()
+        return body[idx + len(label):].strip()
+    if fallback:
+        idx = body.rfind(fallback)
+        if idx != -1:
+            return body[idx + len(fallback):].strip()
     return ""
 
 
-def _wait_gemini_done(page, timeout_s: int) -> str:
-    """Wait for Gemini's latest reply to finish streaming and return it.
+def _norm_ws(s: str) -> str:
+    return re.sub(r"\s+", "", s)
+
+
+def _locate_last_echo(body: str, tail: str) -> int:
+    """Index in ``body`` just past the *last* echo of ``tail``, or -1.
+
+    Browsers insert soft-wrap newlines into ``innerText`` that don't exist in
+    the source text, so the match is done on whitespace-normalized strings and
+    the offset is mapped back onto the original ``body``."""
+    n_body, n_tail = _norm_ws(body), _norm_ws(tail)
+    if not n_body or not n_tail:
+        return -1
+    k = n_body.rfind(n_tail)
+    if k == -1:
+        return -1
+    start = -1
+    seen = 0
+    for idx, ch in enumerate(body):
+        if ch.isspace():
+            continue
+        if seen == k:
+            start = idx
+            break
+        seen += 1
+    if start < 0:
+        return -1
+    left = len(n_tail)
+    j = start
+    while j < len(body) and left:
+        if not body[j].isspace():
+            left -= 1
+        j += 1
+    return -1 if left else j
+
+
+def _extract_current_reply(body: str, label: str, tail: str) -> str:
+    """Reply of the *current* turn: everything after the last echo of ``tail``
+    (the prompt we sent), with the assistant label stripped.
+
+    The label alone is unsafe across reused conversations — an earlier turn's
+    label can still be the last one while the current reply streams, which
+    silently returns stale text."""
+    end = _locate_last_echo(body, tail)
+    if end < 0:
+        return ""
+    seg = body[end:].lstrip("\r\n \t")
+    if label and seg.startswith(label):
+        seg = seg[len(label):]
+    return seg.strip()
+
+
+def _wait_turn_done(page, label: str, fallback: str, tail: str, timeout_s: int) -> str:
+    """Wait for the current turn to finish streaming and return it.
 
     Same settle semantics as ``wait_for_completion`` (text stops growing across
-    ~2 polls) but operating on the last assistant-turn segment, which is stable
-    against Gemini's mid-reply DOM re-rendering of the user message."""
+    ~2 polls) but operating on the segment after the sent prompt's echo, which
+    is stable against the mid-reply DOM re-rendering these UIs perform."""
     last = ""
     unchanged = 0
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         time.sleep(3)
-        cur = _extract_last_gemini_reply(_body_text(page))
+        body = _body_text(page)
+        cur = _extract_current_reply(body, label, tail)
+        if not cur:
+            cur = _extract_last_turn(body, label, fallback)
         if cur == last:
             unchanged += 1
         else:
@@ -183,8 +237,13 @@ def _submit(page, box, submits, mode: str = "button") -> bool:
 
 
 def _ask(page, url, comps, submits, prompt: str, settle_s: float,
-         dismiss=(), stop=None, mode: str = "button") -> str:
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+         dismiss=(), stop=None, mode: str = "button",
+         reply_label: str = "", reply_fallback: str = "") -> str:
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    except Exception:  # noqa: BLE001
+        log.warning("goto %s aborted; continuing on current page", url)
+        time.sleep(2)
     time.sleep(settle_s)
     for sel in dismiss:
         try:
@@ -201,10 +260,12 @@ def _ask(page, url, comps, submits, prompt: str, settle_s: float,
     _type_into(page, box, prompt)
     if not _submit(page, box, submits, mode=mode):
         raise RuntimeError(f"Could not submit prompt on {url}")
-    if mode == "enter":
-        # Gemini's reply segment is extracted by turn label (its DOM re-renders
-        # the user message mid-stream, which would clip a body-length diff).
-        return _wait_gemini_done(page, config.GENERIC_LLM_POLL_DEADLINE_S)
+    if reply_label:
+        # Gemini/ChatGPT re-render the user message mid-stream, which would clip
+        # a body-length diff; extract the current reply after its prompt echo.
+        tail = prompt.strip()[-80:]
+        return _wait_turn_done(page, reply_label, reply_fallback, tail,
+                               config.GENERIC_LLM_POLL_DEADLINE_S)
     return browser_chat.wait_for_completion(
         page, len(_body_text(page)),
         timeout_s=config.GENERIC_LLM_POLL_DEADLINE_S, stop_selector=stop)
@@ -219,9 +280,11 @@ def ask_gemini(page, prompt: str) -> str:
     # Gemini submits on Enter; the visible send button is unreliable (it can open
     # a "copy prompt" overflow instead of sending) — enter mode (R6).
     return _ask(page, GEMINI_URL, GEMINI_COMPS, GEMINI_SUBMITS, prompt,
-                settle_s=9, mode="enter")
+                settle_s=9, mode="enter", reply_label="Gemini said",
+                reply_fallback="You said")
 
 
 def ask_chatgpt(page, prompt: str) -> str:
     return _ask(page, CHATGPT_URL, CHATGPT_COMPS, CHATGPT_SUBMITS, prompt,
-                settle_s=8, dismiss=CHATGPT_DISMISS, stop=CHATGPT_STOP)
+                settle_s=8, dismiss=CHATGPT_DISMISS, stop=CHATGPT_STOP,
+                reply_label="ChatGPT said:")
