@@ -98,6 +98,14 @@ class RunSettings:
     challenge_check: bool = True
     anti_automation: bool = True
     llm_provider: str = "ai_studio"
+    # R7: confirm-before-publish (default interactive; ABORT on anything but y).
+    publish_confirm: bool = True
+    # R7: Ask Studio topic-ideation pre-stage (used when no explicit topic).
+    topic_ideation_enabled: bool = True
+    # R7: the channel-scoped question asked to Ask Studio.
+    ask_studio_question: str = ""
+    # R7: the run's target channel name; always validated against the allowlist.
+    channel_name: Optional[str] = None
     # Mutable during a run: a soft-fail quality gate flips this to downgrade an
     # explicitly-requested public publish to unlisted as the last safety net
     # (R2-W4 / R2-F4).
@@ -108,6 +116,10 @@ class RunSettings:
         _require(self.tts_provider, _TTS_PROVIDERS, "tts_provider")
         _require(self.browser_choice, _BROWSERS, "browser_choice")
         _require(self.headless_mode, _HEADLESS_MODES, "headless_mode")
+        if self.channel_name is not None:
+            from .channels import validate_channel_name
+
+            self.channel_name = validate_channel_name(self.channel_name)
 
     # -- construction ------------------------------------------------------
 
@@ -136,6 +148,13 @@ class RunSettings:
             llm_provider=os.environ.get(
                 "AUTOMATO_LLM_PROVIDER",
                 getattr(config, "LLM_PROVIDER", "ai_studio")),
+            publish_confirm=env_bool("AUTOMATO_PUBLISH_CONFIRM",
+                                      config.PUBLISH_CONFIRM),
+            topic_ideation_enabled=env_bool("AUTOMATO_TOPIC_IDEATION_ENABLED",
+                                            config.TOPIC_IDEATION_ENABLED),
+            ask_studio_question=os.environ.get(
+                "AUTOMATO_ASK_STUDIO_QUESTION",
+                getattr(config, "ASK_STUDIO_QUESTION", "")),
         )
 
     @classmethod
@@ -151,9 +170,20 @@ class RunSettings:
         if getattr(args, "headless_mode", None):
             s.headless_mode = _require(args.headless_mode, _HEADLESS_MODES,
                                        "headless_mode")
-        # Backwards-compatible flag: --headless forces full headless.
         if getattr(args, "headless", False):
             s.headless_mode = "full"
+        if getattr(args, "channel", None):
+            from .channels import channel_names
+
+            s.channel_name = _require(args.channel,
+                                      [c for c in channel_names()],
+                                      "channel")
+        if getattr(args, "yes", False):
+            s.publish_confirm = False
+        if getattr(args, "no_ideate", False):
+            s.topic_ideation_enabled = False
+        if getattr(args, "ideate", False):
+            s.topic_ideation_enabled = True
         return s
 
     @classmethod
@@ -173,6 +203,10 @@ class RunSettings:
             "challenge_check": self.challenge_check,
             "anti_automation": self.anti_automation,
             "llm_provider": self.llm_provider,
+            "publish_confirm": self.publish_confirm,
+            "topic_ideation_enabled": self.topic_ideation_enabled,
+            "ask_studio_question": self.ask_studio_question,
+            "channel_name": self.channel_name,
             "force_unlisted": self.force_unlisted,
         }
 

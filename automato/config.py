@@ -6,6 +6,7 @@ from anywhere.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -186,6 +187,65 @@ YOUTUBE_POST_PUBLISH_SLEEP_S = 6      # settle after clicking Publish/Done
 # the Studio Videos list until then, so URL capture waits up to this long for the
 # row to appear (R6 publish-stale-URL surveillance finding).
 YOUTUBE_PUBLISH_LISTING_WAIT_S = 420
+
+
+# ---- Brand-channel routing (R7) ----
+# The signed-in Google identity carries MULTIPLE channels: a main channel plus
+# brand channels. Both ideation (Ask Studio) and publish are scoped to the
+# channel that is *active* in Studio, and the active channel is read
+# deterministically from the Studio URL's /channel/<id> segment — no menu
+# scraping required. Override with AUTOMATO_CHANNEL_WHITELIST (JSON object
+# mapping names to 24-char channel ids).
+_CHANNEL_WHITELIST_ENV = os.environ.get("AUTOMATO_CHANNEL_WHITELIST", "").strip()
+CHANNEL_WHITELIST = (
+    json.loads(_CHANNEL_WHITELIST_ENV)
+    if _CHANNEL_WHITELIST_ENV
+    else {
+        "main": "UCSH1A5BGmsdNq1oqS1HHLpg",      # AI.Powered.Skills @AIPoweredSkills
+        "es-finance": "UCf0SpoFyFHpegpgBGyRK77w",
+    }
+)
+# The safe default when a topic maps to nothing: always the main channel.
+CHANNEL_DEFAULT = "main"
+# topic-keyword -> channel name; first keyword hit wins (case-insensitive). Used
+# to route a seeded or ideated topic to the right brand channel. Override with
+# AUTOMATO_CHANNEL_MAP (JSON object mapping channel names to keyword lists).
+_CHANNEL_MAP_ENV = os.environ.get("AUTOMATO_CHANNEL_MAP", "").strip()
+CHANNEL_MAP = (
+    json.loads(_CHANNEL_MAP_ENV)
+    if _CHANNEL_MAP_ENV
+    else {
+        "es-finance": ("finance", "money", "invest", "stock", "loan", "rent",
+                       "mortgage", "alquilar", "comprar"),
+        "main": ("ai", "data", "coding", "program", "puzzle", "number",
+                 "challenge", "tech", "reflex"),
+    }
+)
+# confirm-before-publish: the publish stage asks the operator for an explicit
+# "y" immediately before clicking Publish, and ABORTS on anything else. This is
+# the shipping default because a wrong-channel publish is a visible mistake.
+# Disable (or pre-confirm) with AUTOMATO_PUBLISH_CONFIRM=0|false or the CLI
+# --yes flag.
+PUBLISH_CONFIRM = True
+
+# Topic-ideation pre-stage (Ask Studio): a run without an explicit seed topic
+# derives one from the active channel's Ask Studio assistant, which reasons over
+# the channel's OWN performance data. Ask Studio refuses general content
+# requests, so the question must stay frameworked around the channel's metrics.
+# Disable with AUTOMATO_TOPIC_IDEATION_ENABLED=0|false; force with the CLI
+# --ideate flag.
+TOPIC_IDEATION_ENABLED = True
+# Channel-scoped question asked to Ask Studio. Override with
+# AUTOMATO_ASK_STUDIO_QUESTION.
+ASK_STUDIO_QUESTION = (
+    "Based on my channel's recent shorts performance and audience behavior, what "
+    "single topic should my next short cover to maximize next-stage traffic? "
+    "Recommend one concrete topic."
+)
+# Hard deadline for an Ask Studio answer (it streams in tens of seconds).
+ASK_STUDIO_REPLY_WAIT_S = 240
+# How long to wait for the chat composer to appear after opening the drawer.
+ASK_STUDIO_COMPOSER_WAIT_S = 30
 
 
 def ensure_dirs() -> None:

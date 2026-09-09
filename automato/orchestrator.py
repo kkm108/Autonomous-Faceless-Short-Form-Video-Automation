@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 
 from . import config
 from .adapters.base import AdapterContext, ExecutorError
+from .channels import resolve_channel_name
 from .manifest import WorkflowError, adapter_callable, load_manifest, stage_output_names
 from .resilience.retry import _backoff_delay
 from .settings import RunSettings
@@ -29,6 +30,7 @@ _ADAPTER_PROVIDER: Dict[str, str] = {
     "assets.perchance_images": "perchance",
     "tts.kokoro_tts": "tts",
     "publish.youtube_studio": "youtube",
+    "ideation.ask_studio": "youtube",
 }
 
 
@@ -220,12 +222,52 @@ def run_workflow(workflow_name: str, seed: Dict[str, Any],
             lock_manager.__exit__(None, None, None)
 
 
+def _ideation_should_run(settings: RunSettings, seed: Dict[str, Any]) -> bool:
+    return (
+        settings.topic_ideation_enabled
+        and not (seed.get("topic") or "").strip()
+    )
+
+
+def _resolve_run_channel(settings: RunSettings, seed: Dict[str, Any]) -> None:
+    """Resolve + validate the run's target channel (CLI override > topic map >
+    safe main-channel default). Safe to call again after ideation re-seeds."""
+    if settings.channel_name is None:
+        settings.channel_name = resolve_channel_name(
+            (seed.get("topic") or "").strip())
+    else:
+        settings.channel_name = resolve_channel_name(
+            (seed.get("topic") or "").strip(),
+            explicit=settings.channel_name)
+
+
+def _ideation_pre_stage(settings: RunSettings) -> dict:
+    """The synthesized Ask Studio pre-stage that feeds the scripting pipeline.
+
+    Deliberately carries NO inputs: the engine's binding resolver rewrites bare
+    strings into ``run_dir`` paths, and the ideation adapter reads its channel
+    + question from ``ctx.settings`` (resolved by the orchestrator) instead.
+    """
+    return {
+        "id": "ideation",
+        "adapter": "ideation.ask_studio",
+        "inputs": {},
+        "outputs": {
+            "topic": config.OUTPUT_DIR,
+            "provider": config.OUTPUT_DIR,
+            "channel_id": config.OUTPUT_DIR,
+            "ideation": config.OUTPUT_DIR,
+            "raw": config.OUTPUT_DIR,
+        },
+    }
+
+
 def _run_workflow_locked(workflow_name: str, seed: Dict[str, Any],
                          resume_run_id: Optional[str],
                          settings: Optional[RunSettings],
                          guard) -> RunState:
     manifest = load_manifest(workflow_name)
-    stages = manifest["stages"]
+    stages: list = manifest["stages"]
     declared_outs = stage_output_names(manifest)
 
     if resume_run_id:
@@ -233,6 +275,21 @@ def _run_workflow_locked(workflow_name: str, seed: Dict[str, Any],
         log.info("Resuming run %s from previous state", state.run_id)
     else:
         state = RunState.create(workflow_name, seed)
+    settings = settings or RunSettings.defaults()
+
+    # R7 channel routing: resolve + validate the target channel before any stage
+    # runs. With ideation, the topic is unknown yet, so the default (safe main
+    # channel) is asked first and re-resolved once a topic lands.
+    channel_explicit = settings.channel_name is not None
+    _resolve_run_channel(settings, state.seed)
+
+    if _ideation_should_run(settings, state.seed):
+        pre = _ideation_pre_stage(settings)
+        stages = [pre] + stages
+        declared_outs.setdefault("ideation", set(pre["outputs"].keys()))
+        log.info("R7 topic-ideation pre-stage enabled (channel %s); no explicit "
+                 "topic supplied", settings.channel_name)
+
     ctx = AdapterContext(seed=state.seed, workflow=manifest, settings=settings)
     log.info("Run %s: workflow=%s, %d stages [%s]",
              state.run_id, workflow_name, len(stages), settings or "default")
@@ -274,6 +331,13 @@ def _run_workflow_locked(workflow_name: str, seed: Dict[str, Any],
 
         prior[sid] = outputs
         state.mark_completed(sid, outputs)
+
+        # R7: after ideation lands a topic, re-resolve the target channel from
+        # that topic (an explicit CLI --channel stays authoritative).
+        if sid == "ideation" and not channel_explicit:
+            _resolve_run_channel(settings, state.seed)
+            log.info("R7 target channel re-resolved from ideated topic: %s",
+                     settings.channel_name)
 
         # Quality gates (R2-W4/R2-F4): enforce a publish-quality floor per stage.
         requested_images = None

@@ -16,12 +16,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from ... import config
 from ...browser import session as session_mod
+from ...channels import active_channel_id, channel_id_for, ensure_channel
 from ..base import ExecutorError
 
 log = logging.getLogger(__name__)
@@ -77,6 +79,13 @@ LOCS = {
         "button[aria-label='Close']",
         "ytcp-button#close-button",
     ],
+    # YouTube gates publishes while checks are pending with a
+    # "Publish anyway" interstitial (observed on a claim-flagged channel).
+    "publish_anyway": [
+        "ytcp-button:has-text('Publish anyway')",
+        "ytcp-button:has-text('Publish Anyway')",
+        "button[aria-label*='publish anyway' i]",
+    ],
 }
 
 
@@ -111,6 +120,7 @@ def _row_text(page, link) -> str:
             "  const r = e.closest('ytcp-video-row')"
             "    || e.closest('ytcp-video-upload-status')"
             "    || e.closest('tp-yt-paper-list-item')"
+            "    || e.closest('ytcp-uploads-dialog')"
             "    || e.parentElement;"
             "  return r ? (r.textContent || '') : ''; }"
         ) or "")
@@ -271,6 +281,83 @@ def _id_from_video_list(page, title: str, timeout_s: int = 420) -> Optional[str]
     return None
 
 
+def _omnisearch_results(page, query: str) -> List[tuple]:
+    """Run Studio's own cross-channel search (header omnisearch) and return
+    ``(row_text, video_id)`` pairs.
+
+    The Content list scan is fragile: rows whose title text lives inside shadow
+    DOM (or that sit beyond the first virtualized page) are invisible to
+    ``inner_text`` even though they are uploaded. Studio's "Search across your
+    channel" panel renders the same rows in a way we can read, so it is the
+    authoritative fallback for confirming an upload and recovering its id."""
+    ids = []
+    try:
+        for getter in (lambda: page.get_by_role("button", name="Search"),
+                       lambda: page.locator("[aria-label='Search']")):
+            loc = getter()
+            if loc.count() > 0:
+                loc.first.click(timeout=5000, force=True)
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    q = page.locator("#query-input")
+    if q.count() == 0:
+        return []
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            if q.first.is_visible(timeout=1000):
+                break
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.5)
+    try:
+        q.first.fill(query, timeout=5000, force=True)
+        time.sleep(2)
+        page.keyboard.press("Enter")
+        time.sleep(5)
+        ids = page.evaluate("""() => {
+            const out = [];
+            const root = document.querySelector('ytcp-omnisearch-results')
+                || document.querySelector('ytcp-omnisearch') || document;
+            const seen = new Set();
+            for (const a of root.querySelectorAll(
+                    'a[href*="/video/"], a[href*="/shorts/"], a[href*="/watch"], a[href*="youtu.be"]')) {
+                const row = a.closest('ytcp-video-search-row, ytcp-video-row, li')
+                    || a.parentElement;
+                out.push({ text: (row.textContent || '').replace(/\\s+/g, ' ').slice(0, 300),
+                           href: a.href || '' });
+            }
+            return out;
+        }""")
+    except Exception:  # noqa: BLE001
+        ids = []
+    pairs = []
+    for item in ids or []:
+        vid = _id_from_href(item.get("href") or "")
+        if vid and vid not in pairs and (item.get("text") or "") not in pairs:
+            pairs.append((item.get("text") or "", vid))
+    return pairs
+
+
+def _omnisearch_ids_for_title(page, title: str, timeout_s: int = 25) -> Optional[str]:
+    """Find a freshly-uploaded video id via Studio's cross-channel search."""
+    needle = (title or "").strip()[:_TITLE_MATCH_PREFIX]
+    if not needle:
+        return None
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            for text, vid in _omnisearch_results(page, title.strip()[:40]):
+                if needle and needle in text:
+                    log.info("Found uploaded video via cross-channel search: %s", vid)
+                    return vid
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(4)
+    return None
+
+
 def _load_previous(run_dir: Path):
     """Return a prior publish result dict if this run already published."""
     out_path = run_dir / "post_url.json"
@@ -299,20 +386,155 @@ def _upload_attempted(run_dir: Path) -> Optional[float]:
         return None
 
 
-def _mark_upload_attempted(run_dir: Path, title: str) -> None:
+def _mark_upload_attempted(run_dir: Path, title: str, channel_name: str) -> None:
     """Persist an upload-attempt marker before the Publish click."""
     path = run_dir / "upload_attempted.json"
     path.write_text(json.dumps({
         "attempted_at": time.time(),
         "title": title,
         "visibility": "unlisted",
+        "channel": channel_name,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _checked_visibility(page, visibility: str, ux) -> None:
+    """Click the visibility radio and confirm the selection actually applied.
+
+    A name-targeted radio click that silently fails (or decoys) leaves the upload
+    on the dialog's default PRIVATE radio — which then never shows a row in the
+    Content lists and looks like a failed publish (E2E observation).
+    """
+    target = visibility.upper()
+    for _ in range(3):
+        try:
+            vis_btn = page.locator(
+                f"tp-yt-paper-radio-button[name='{target}']").first
+            ux.click(vis_btn, description=f"set visibility {visibility}",
+                     loc_group="visibility")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("visibility radio click failed (%s)", exc)
+        time.sleep(config.YOUTUBE_POST_CLICK_SLEEP_S)
+        current = _selected_visibility(page)
+        if current is not None and target in current.upper():
+            log.info("Visibility '%s' confirmed on the upload dialog", visibility)
+            return
+        try:
+            label = page.locator(
+                f"tp-yt-paper-radio-button:has-text('{visibility}')").first
+            ux.click(label, description=f"set visibility {visibility} (label)",
+                     loc_group="visibility")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("visibility label click failed (%s)", exc)
+    log.warning("Could not verify visibility '%s'; checked radio reads '%s'",
+                visibility, _selected_visibility(page) or "?")
+
+
+def _selected_visibility(page) -> Optional[str]:
+    """Read the currently-checked radio's label text inside the upload dialog."""
+    try:
+        dialog = page.locator("ytcp-uploads-dialog").first
+        for radio in dialog.locator(
+                "tp-yt-paper-radio-button[aria-checked='true'], "
+                "tp-yt-paper-radio-button.iron-selected, "
+                "tp-yt-paper-radio-button[checked]").all():
+            txt = (radio.inner_text(timeout=1500) or "").strip()
+            if txt:
+                return txt
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _confirm_publish_anyway(page, ux) -> None:
+    """If YouTube gates the publish behind its pending-checks warning, click the
+    required 'Publish anyway' confirmation button once it appears."""
+    from ...resilience.location import ProviderLocations
+    locs = ProviderLocations(LOCS, provider="youtube")
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        try:
+            btn = locs.try_resolve(page, "publish_anyway", timeout=1500)
+            if btn is not None:
+                ux.click(btn, description="confirm publish anyway",
+                         loc_group="publish_anyway", force=True)
+                log.info("Published past the pending-checks warning "
+                         "('Publish anyway' clicked)")
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(1)
+    log.debug("No 'Publish anyway' gate present after the publish click")
+
+
+def _verify_target_channel(page, ctx, url_scope: Optional[str] = None) -> str:
+    """R7 hard pre-upload gate: route Studio onto the run's target channel and
+    then RE-VERIFY that the active channel matches. Any mismatch aborts before a
+    single upload action — never warn-and-continue."""
+    channel_name = ctx.settings.channel_name or config.CHANNEL_DEFAULT
+    target_id = channel_id_for(channel_name)
+    if target_id is None:
+        raise ExecutorError(
+            f"No channel id for target channel '{channel_name}'; check the "
+            "validated allowlist (automato/config.py or "
+            "AUTOMATO_CHANNEL_WHITELIST).",
+            retryable=False,
+        )
+    log.info("Publish target channel: %s (%s)", channel_name, target_id)
+    ensure_channel(page, target_id)
+    active = active_channel_id(page)
+    if active != target_id:
+        raise ExecutorError(
+            f"Active Studio channel {active} does not match intended target "
+            f"{target_id} ({channel_name}); aborting before upload.",
+            retryable=False,
+        )
+    return channel_name
+
+
+def _confirm_publish(settings, title: str, channel_name: str,
+                     input_fn=None) -> bool:
+    """R7 confirm-before-publish: explicit operator 'y' immediately before the
+    Publish click; anything else aborts. Without an interactive terminal the
+    default is to abort (safe), unless confirmation was disabled/--yes'd. An
+    explicitly passed ``input_fn`` (tests, drivers) skips the tty gate."""
+    if not settings.publish_confirm:
+        return True
+    interactive = False
+    if input_fn is not None:
+        interactive = True
+    else:
+        input_fn = sys.stdin.readline
+        try:
+            interactive = sys.stdin.isatty()
+        except Exception:  # noqa: BLE001
+            interactive = False
+    if not interactive:
+        raise ExecutorError(
+            "Publish confirmation is enabled but stdin is not interactive. "
+            "Re-run from a terminal (or pass --yes to pre-confirm). Aborting "
+            "before publishing anything.",
+            retryable=False,
+        )
+    answer = (input_fn(
+        f"About to publish '{title}' to channel '{channel_name}'. "
+        "Publish now? [y/N] ") or "").strip().lower()
+    if answer not in ("y", "yes"):
+        raise ExecutorError(
+            "Aborted by operator before publish.",
+            retryable=False,
+        )
+    return True
 
 
 def _recent_upload_exists(page, title: str, timeout_s: int = 60) -> bool:
     """Navigate YouTube Studio's Videos list and check for ``title`` among recent
     uploads. Used on resume to avoid double-publishing when the previous attempt
     succeeded but never wrote ``post_url.json``.
+
+    The list's ``inner_text`` can miss rows whose titles render inside shadow DOM
+    or beyond the first virtualized page, so the cross-channel search is the
+    authoritative fallback (observed: a published short invisible to the list but
+    found instantly by omnisearch).
     """
     try:
         _goto_videos_list(page)
@@ -327,13 +549,14 @@ def _recent_upload_exists(page, title: str, timeout_s: int = 60) -> bool:
                 # "No videos" empty-state: definitely not present.
                 empty = page.locator("text=You haven't uploaded any videos yet")
                 if empty.count() > 0:
-                    return False
+                    break
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(3)
-        return False
     except Exception:  # noqa: BLE001
         return False
+    # Authoritative fallback: Studio's own cross-channel search.
+    return _omnisearch_ids_for_title(page, title, timeout_s=20) is not None
 
 
 def run(ctx, inputs, run_dir, session):
@@ -411,6 +634,11 @@ def run(ctx, inputs, run_dir, session):
     ux.goto(STUDIO_URL, wait_until="domcontentloaded")
     time.sleep(config.YOUTUBE_UI_SETTLE_S)
 
+    # R7 hard pre-upload gate: the active Studio channel MUST be the run's
+    # intended target before any upload action. Routes onto the target and
+    # re-verifies; any mismatch aborts.
+    channel_name = _verify_target_channel(page, ctx)
+
     # 1. Create button
     create = locs.resolve(page, "create")
     ux.click(create, description="studio create", loc_group="create")
@@ -473,19 +701,28 @@ def run(ctx, inputs, run_dir, session):
         ux.click(next_btn, description=f"next step {step + 1}", loc_group="next")
         time.sleep(config.YOUTUBE_POST_CLICK_SLEEP_S)
 
-    # 9. Visibility
-    vis_btn = page.locator(f"tp-yt-paper-radio-button[name='{visibility.upper()}']").first
-    try:
-        ux.click(vis_btn, description=f"set visibility {visibility}", loc_group="visibility")
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Could not select visibility (%s); using default radio", exc)
+    # 9. Visibility. The name-targeted radio is not always live on the final
+    #    step (and a failed selection silently leaves the upload PRIVATE, which
+    #    then shows no row in the Content lists). Click the named radio, then
+    #    VERIFY the checked radio actually reads the requested visibility,
+    #    falling back to a text-labeled click.
+    _checked_visibility(page, visibility, ux)
 
     # 10. Publish / Done. Write a durable "upload attempted at T" marker BEFORE
     #     clicking so a resume can detect a possibly-succeeded upload even if
-    #     post_url.json is never written (R1-W3).
-    _mark_upload_attempted(run_dir, title)
+    #     post_url.json is never written (R1-W3). R7: ask for an explicit
+    #     confirm-before-publish here (aborts on anything but 'y').
+    _confirm_publish(ctx.settings, title, channel_name)
+    _mark_upload_attempted(run_dir, title, channel_name)
     done = locs.resolve(page, "done_publish")
     ux.click(done, description="publish/done", loc_group="done_publish")
+
+    # 10b. Pending-checks gate: when publishing first triggers YouTube's
+    #     "you may get a strike" warning, a second explicit "Publish anyway"
+    #     click is required before the upload completes. Without it the video is
+    #     never actually published (it stays private in the still-open dialog),
+    #     which is exactly the silent-failure signature seen in E2E.
+    _confirm_publish_anyway(page, ux)
     time.sleep(config.YOUTUBE_POST_PUBLISH_SLEEP_S)
 
     # 11. Extract URL — title-scoped only. A page-wide first-match scan latched
@@ -506,6 +743,13 @@ def run(ctx, inputs, run_dir, session):
                  "Studio Videos list for '%s'", title)
         vid = _id_from_video_list(page, title,
                                   timeout_s=config.YOUTUBE_PUBLISH_LISTING_WAIT_S)
+    if vid is None:
+        # The Content list can stay blind to a freshly-published short (shadow
+        # DOM / pagination), while Studio's own cross-channel search finds it
+        # immediately. Try it before declaring the URL unrecoverable.
+        log.info("List watcher found nothing; searching across the channel for "
+                 "'%s'", title)
+        vid = _omnisearch_ids_for_title(page, title, timeout_s=30)
     if vid and vid in recognized:
         log.warning("Studio list link named id '%s' already recorded by an "
                     "earlier run; refusing to record a duplicate", vid)
@@ -533,8 +777,10 @@ def run(ctx, inputs, run_dir, session):
             retryable=True,
         )
 
-    result = {"status": "uploaded", "visibility": visibility, "url": url}
+    result = {"status": "uploaded", "visibility": visibility, "url": url,
+              "channel": channel_name}
     out_path = run_dir / "post_url.json"
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info("Publish result: %s", result)
-    return {"post_url": str(out_path), "url": url, "visibility": visibility}
+    return {"post_url": str(out_path), "url": url, "visibility": visibility,
+            "channel": channel_name}

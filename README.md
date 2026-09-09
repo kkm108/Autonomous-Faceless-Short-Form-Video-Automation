@@ -125,11 +125,21 @@ Add `-v` to any command for verbose logs.
 ## `run` in depth
 
 ```
-python -m automato run "<topic>" [options]
+python -m automato run ["<topic>"] [options]
 ```
+
+**Topic is optional.** With a topic, it is scripted directly. Without one, an
+**ideation pre-stage** asks the active channel's own Ask Studio assistant
+(grounded in real channel performance statistics) for the next topic, then hands
+it to the exact same scripting pipeline — the pre-stage never replaces it.
 
 | Option | Values | Default | Meaning |
 |---|---|---|---|
+| `topic` | text | (derive) | Seed topic; omit to let Ask Studio ideation choose one. |
+| `--ideate` | flag | off | Force the Ask Studio pre-stage even if a topic was typed. |
+| `--no-ideate` | flag | off | Disable the ideation pre-stage (topic then required). |
+| `--channel` | allowlist name | topic-derived → `main` | Target brand channel for ideation + publish. |
+| `--yes` | flag | off | Skip the interactive confirm-before-publish prompt. |
 | `--visibility` | `public` \| `unlisted` \| `private` | `unlisted` (or `AUTOMATO_VISIBILITY`) | Where the upload lands. |
 | `--workflow` | name | `faceless_short` | `workflows/<name>.json` manifest to run. |
 | `--resume` | run id | — | Resume an interrupted run at its first incomplete stage. |
@@ -300,6 +310,11 @@ the full, current list:
 | `AUTOMATO_ANTI_AUTOMATION` | Anti-bot flag injection (recommended). |
 | `AUTOMATO_MODAL_DISMISS_ENABLED` | `0` disables automatic modal sweeping. |
 | `AUTOMATO_ALLOW_EXTERNAL_ADAPTERS` | `1` lets workflows import fully-qualified external adapter modules. |
+| `AUTOMATO_CHANNEL_WHITELIST` | JSON `{"name": "24-char-channel-id"}` allowlist of routable brand channels. |
+| `AUTOMATO_CHANNEL_MAP` | JSON `{"channel": ["topic", "keywords"]}` topic→channel routing (first hit wins). |
+| `AUTOMATO_PUBLISH_CONFIRM` | `0` disables the interactive confirm-before-publish prompt. |
+| `AUTOMATO_TOPIC_IDEATION_ENABLED` | `0` disables the Ask Studio topic-ideation pre-stage. |
+| `AUTOMATO_ASK_STUDIO_QUESTION` | Alternative channel-scoped question for Ask Studio. |
 | `AUTOMATO_BACKUP_PASSPHRASE` | AES passphrase for backups (else one is generated & printed). |
 
 Tuning timers (timeouts, retry backoff, settle intervals, deadline seconds) are

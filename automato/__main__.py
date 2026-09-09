@@ -42,7 +42,16 @@ def cmd_run(args) -> int:
               f"'pip install -r requirements.txt'.")
         return _EXIT_INTERNAL
 
-    seed = {"topic": args.topic}
+    if not args.topic and not settings.topic_ideation_enabled:
+        print("ERROR: no seed topic given and the Ask Studio topic-ideation "
+              "pre-stage is disabled. Pass a topic, re-enable ideation "
+              "(--ideate / AUTOMATO_TOPIC_IDEATION_ENABLED=1), or drop "
+              "--no-ideate.")
+        return _EXIT_USAGE
+
+    seed = {}
+    if args.topic:
+        seed["topic"] = args.topic
     from .orchestrator import run_workflow
     state = run_workflow(args.workflow, seed, resume_run_id=args.resume,
                          settings=settings)
@@ -197,8 +206,24 @@ def main(argv=None) -> int:
                                      description="Autonomous faceless short-form video automation")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="Run the full pipeline from a seed topic")
-    p_run.add_argument("topic", help="Seed topic for the video")
+    p_run = sub.add_parser("run", help="Run the full pipeline. With a topic, that "
+                                       "topic is scripted; without one, the Ask "
+                                       "Studio pre-stage derives a topic from the "
+                                       "channel's performance.")
+    p_run.add_argument("topic", nargs="?", default=None,
+                       help="Seed topic for the video (omit to let the Ask "
+                            "Studio ideation pre-stage derive one)")
+    p_run.add_argument("--ideate", action="store_true",
+                       help="Force the Ask Studio topic-ideation pre-stage even "
+                            "when a topic was given")
+    p_run.add_argument("--no-ideate", action="store_true",
+                       help="Disable the Ask Studio topic-ideation pre-stage")
+    p_run.add_argument("--channel", default=None,
+                       help="Target brand channel for ideation + publish "
+                            "(allowlist names; default resolves from the topic "
+                            "or config.CHANNEL_DEFAULT)")
+    p_run.add_argument("--yes", action="store_true",
+                       help="Skip the interactive confirm-before-publish prompt")
     p_run.add_argument("--workflow", default=config.DEFAULT_WORKFLOW,
                        help="Workflow manifest name")
     p_run.add_argument("--visibility", choices=["public", "unlisted", "private"],
@@ -316,8 +341,9 @@ def main(argv=None) -> int:
         from .browser.session import AuthRequiredError
         from .manifest import WorkflowError
         from .run_guard import RunGuardError
+        from .settings import SettingsError
         if isinstance(exc, (ExecutorError, WorkflowError, RestoreError,
-                            AuthRequiredError, RunGuardError)):
+                            AuthRequiredError, RunGuardError, SettingsError)):
             log = logging.getLogger("automato.cli")
             log.error("Command failed: %s", exc)
             sys.stderr.write(f"ERROR: {exc}\n")

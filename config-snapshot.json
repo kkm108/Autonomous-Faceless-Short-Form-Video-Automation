@@ -15,6 +15,13 @@
   "TTS_BROWSER_TIMEOUT_S": 120,
   "EDGE_TTS_VOICE": "en-US-ChristopherNeural",
   "LLM_PROVIDER": "gemini",
+  "CHANNEL_WHITELIST": {
+    "main": "UCSH1A5BGmsdNq1oqS1HHLpg",
+    "es-finance": "UCf0SpoFyFHpegpgBGyRK77w"
+  },
+  "CHANNEL_DEFAULT": "main",
+  "PUBLISH_CONFIRM": true,
+  "TOPIC_IDEATION_ENABLED": true,
   "DEFAULT_WORKFLOW": "faceless_short",
   "DEFAULT_VISIBILITY": "unlisted",
   "RETRY_ATTEMPTS": 4
