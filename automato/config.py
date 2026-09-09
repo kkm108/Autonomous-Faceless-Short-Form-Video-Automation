@@ -182,6 +182,10 @@ YOUTUBE_UI_SETTLE_S = 3               # post-navigation settle
 YOUTUBE_POST_CLICK_SLEEP_S = 2        # micro-settle between workflow steps
 YOUTUBE_UPLOAD_DEADLINE_S = 120       # deadline for the upload dialog to reach DETAILS
 YOUTUBE_POST_PUBLISH_SLEEP_S = 6      # settle after clicking Publish/Done
+# A just-published short stays "processing" for a couple of minutes: it isn't in
+# the Studio Videos list until then, so URL capture waits up to this long for the
+# row to appear (R6 publish-stale-URL surveillance finding).
+YOUTUBE_PUBLISH_LISTING_WAIT_S = 420
 
 
 def ensure_dirs() -> None:

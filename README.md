@@ -492,6 +492,12 @@ disclose synthetic media, iterate on real content, and go public only deliberate
 - **The core dependency is five third-party UIs, outside this project's control.**
   They change — hence the resilience layer, recovery-trend telemetry, and a
   scheduled `health-check` instead of pretending drift can't happen.
+- **Scripting's default provider is the no-login Gemini web chain, not AI Studio.**
+  Google gated Gemini 3 Flash Preview in the free AI Studio Playground behind a
+  Google AI Plan / API key, so the engine defaults to the zero-login Gemini chain
+  (duck.ai → Ask Brave → ChatGPT fallbacks) and only uses AI Studio when
+  `AUTOMATO_LLM_PROVIDER=ai_studio` is explicitly pinned with a paid plan —
+  accepted as a trade-off for zero-dependency, zero-billing scripting.
 - **Automating a platform's own web UI carries inherent ToS/account risk.** An
   official API would need keys, quotas, and billing; this project deliberately
   stays API-free. YouTube's Repetitious Content / AI-disclosure and anti-abuse

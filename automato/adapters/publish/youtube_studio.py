@@ -80,28 +80,194 @@ LOCS = {
 }
 
 
-def _extract_url(page):
-    for sel in LOCS["video_link"]:
-        try:
-            link = page.locator(sel).first
-            href = link.get_attribute("href", timeout=4000)
-            if href:
-                return href if href.startswith("http") else f"https://youtube.com{href}"
-        except Exception:  # noqa: BLE001
-            continue
+_VIDEO_LINK_PATTERNS = (
+    r"youtu\.be/([A-Za-z0-9_-]{11})",
+    r"[?&]v=([A-Za-z0-9_-]{11})",
+    r"/shorts/([A-Za-z0-9_-]{11})",
+    r"/video/([A-Za-z0-9_-]{11})(?:/|$|\?)",
+)
+
+# Studio truncates long titles in row text; match on a safe prefix so a truncated
+# row still contains the needle (a full-title needle silently missed after Publish).
+_TITLE_MATCH_PREFIX = 28
+
+
+def _id_from_href(href: str) -> Optional[str]:
+    """Extract an 11-char YouTube video id from a structurally-shaped href
+    (youtu.be, watch?v=, /shorts/, /video/<id>/edit). Bare 11-char regexes over
+    arbitrary strings are avoided on purpose (too many false id hits)."""
+    href = href or ""
+    for pattern in _VIDEO_LINK_PATTERNS:
+        m = re.search(pattern, href)
+        if m:
+            return m.group(1)
     return None
 
 
-def _extract_url_after_recent(page):
-    """On the Studio Videos list, find a video row's link/URL if available."""
+def _row_text(page, link) -> str:
     try:
-        links = page.locator("a[href*='youtu.be'], a[href*='/watch?v=']")
-        for i in range(links.count()):
-            href = links.nth(i).get_attribute("href", timeout=3000)
-            if href:
-                return href if href.startswith("http") else f"https://youtube.com{href}"
+        return (link.evaluate(
+            "e => {"
+            "  const r = e.closest('ytcp-video-row')"
+            "    || e.closest('ytcp-video-upload-status')"
+            "    || e.closest('tp-yt-paper-list-item')"
+            "    || e.parentElement;"
+            "  return r ? (r.textContent || '') : ''; }"
+        ) or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _candidate_links(page, scope: str):
+    sels = (
+        f"{scope} a[href*='youtu.be']",
+        f"{scope} a[href*='/watch?v=']",
+        f"{scope} a[href*='/shorts/']",
+        f"{scope} a[href*='/video/']",
+    )
+    for sel in sels:
+        try:
+            links = page.locator(sel)
+            for i in range(min(links.count(), 60)):
+                try:
+                    yield links.nth(i)
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _extract_id_for_title(page, title: str, scope: str = "body") -> Optional[str]:
+    """Scoped URL extraction: only accept a video link whose enclosing row names
+    the freshly uploaded title. A naive page-wide first match latched onto a
+    stale video id for several runs (R6 surveillance finding); title-scoping makes
+    the capture unambiguous."""
+    needle = (title or "").strip()[:_TITLE_MATCH_PREFIX]
+    if not needle:
+        return None
+    for link in _candidate_links(page, scope):
+        try:
+            href = link.get_attribute("href", timeout=3000) or ""
+        except Exception:  # noqa: BLE001
+            continue
+        if not href or not any(k in href for k in
+                               ("youtu.be", "/watch?v=", "/shorts/", "/video/")):
+            continue
+        try:
+            link_text = link.inner_text(timeout=2000) or ""
+        except Exception:  # noqa: BLE001
+            link_text = ""
+        if needle not in link_text and needle not in _row_text(page, link):
+            continue
+        vid = _id_from_href(href)
+        if vid:
+            return vid
+    return None
+
+
+def _known_video_ids(exclude_run_dir: Path, root: Optional[Path] = None) -> set:
+    """Every video id previously recorded under output/. Guard against re-capturing
+    a stale id that an earlier publish already claimed."""
+    ids = set()
+    if root is None:
+        root = Path(__file__).resolve().parents[3] / "output"
+    try:
+        for post in root.glob("*/post_url.json"):
+            try:
+                if exclude_run_dir is not None and post.parent == exclude_run_dir:
+                    continue
+                url = (json.loads(post.read_text(encoding="utf-8")) or {}).get("url", "")
+                vid = _id_from_href(url)
+                if vid:
+                    ids.add(vid)
+            except Exception:  # noqa: BLE001
+                continue
     except Exception:  # noqa: BLE001
         pass
+    return ids
+
+
+def _goto_videos_list(page, shorts: bool = True) -> None:
+    """Navigate to Studio's Content list the way it actually works, optionally
+    onto the Shorts tab.
+
+    Deep-linking straight to ``studio.youtube.com/videos`` renders
+    "Oops, something went wrong." (observed repeatedly in probes), while going
+    to the Studio root and clicking the "Content" nav item reliably renders the
+    row list. Uploaded shorts additionally live under the "Shorts" tab — the
+    "Videos" tab (the active default) won't list them (R6 probe observation), so
+    we switch there when looking for a just-published short."""
+    try:
+        page.goto("https://studio.youtube.com/", wait_until="domcontentloaded",
+                  timeout=30000)
+        time.sleep(config.YOUTUBE_UI_SETTLE_S)
+    except Exception:  # noqa: BLE001
+        pass
+    for getter in (
+        lambda: page.get_by_role("link", name="Content"),
+        lambda: page.get_by_text("Content", exact=True).first,
+    ):
+        try:
+            loc = getter()
+            if loc.count() > 0:
+                loc.click(timeout=6000)
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    if shorts:
+        for getter in (
+            lambda: page.get_by_role("tab", name="Shorts"),
+            lambda: page.locator("tp-yt-paper-tab:has-text('Shorts')", has_text="Shorts"),
+            lambda: page.get_by_text("Shorts", exact=True).first,
+        ):
+            try:
+                loc = getter()
+                if loc.count() > 0:
+                    loc.click(timeout=6000)
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+    time.sleep(config.YOUTUBE_UI_SETTLE_S)
+
+
+def _id_from_video_list(page, title: str, timeout_s: int = 420) -> Optional[str]:
+    """Patiently watch Studio's Videos list for the row named ``title`` and
+    return its video id.
+
+    A just-published short is still *processing* right after Publish: it is not
+    yet present in the Content list (and the upload dialog has closed), so a
+    quick scan returns nothing. The row reliably appears within a couple of
+    minutes, so we scan until it does, re-visiting the list each pass to avoid a
+    stale state, bounded by ``timeout_s``."""
+    needle = (title or "").strip()[:_TITLE_MATCH_PREFIX]
+    if not needle:
+        return None
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        _goto_videos_list(page)
+        scan_until = time.time() + 20
+        while time.time() < scan_until:
+            try:
+                rows = page.locator("ytcp-video-row")
+                for i in range(min(rows.count(), 80)):
+                    try:
+                        row = rows.nth(i)
+                        if needle and needle not in (row.inner_text(timeout=3000) or ""):
+                            continue
+                        href = row.locator("a[href*='/video/']").first.get_attribute(
+                            "href", timeout=3000) or ""
+                        vid = _id_from_href(href)
+                        if vid:
+                            log.info("Found uploaded video row in Studio list: %s -> %s",
+                                     (row.inner_text(timeout=2000) or "").strip()[:_TITLE_MATCH_PREFIX],
+                                     vid)
+                            return vid
+                    except Exception:  # noqa: BLE001
+                        continue
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(3)
+        time.sleep(5)
     return None
 
 
@@ -149,11 +315,10 @@ def _recent_upload_exists(page, title: str, timeout_s: int = 60) -> bool:
     succeeded but never wrote ``post_url.json``.
     """
     try:
-        page.goto("https://studio.youtube.com/videos", wait_until="domcontentloaded",
-                  timeout=30000)
+        _goto_videos_list(page)
         # The video-list rows render as ytcp-video-row elements or title cells.
         deadline = time.time() + timeout_s
-        needle = (title or "").strip()[:80]
+        needle = (title or "").strip()[:_TITLE_MATCH_PREFIX]
         while time.time() < deadline:
             try:
                 content = page.locator("body").inner_text(timeout=4000)
@@ -192,31 +357,27 @@ def run(ctx, inputs, run_dir, session):
     # before re-submitting the file input to avoid publishing the video twice.
     attempted = _upload_attempted(run_dir)
     if attempted is not None:
-        page_check = None
+        # Reuse the ALREADY-OPEN provider session (same process retry/resume):
+        # opening a fresh sync session here crashes with "Playwright Sync API
+        # inside the asyncio loop" when the orchestrator retries in-process.
         try:
-            bs, _ = session_mod.open_session("youtube", settings=ctx.settings)
-            try:
-                page_check = bs.first_page()
-                session_mod.run_auth_check("youtube", bs)
-                title_hint = (json.loads(
-                    (run_dir / "upload_attempted.json").read_text(encoding="utf-8")
-                ).get("title") or "")
-                if _recent_upload_exists(page_check, title_hint):
-                    # The upload did go through; record it and treat as done.
-                    url = _extract_url_after_recent(page_check) or ""
-                    out_path = run_dir / "post_url.json"
-                    if url:
-                        out_path.write_text(json.dumps(
-                            {"status": "uploaded", "visibility": "unlisted",
-                             "url": url}, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
-                        return {"post_url": str(out_path), "url": url,
-                                "visibility": "unlisted"}
-            finally:
-                try:
-                    bs.close()
-                finally:
-                    session_mod.release_session_lock("youtube")
+            page_check = session.first_page()
+            session_mod.run_auth_check("youtube", session)
+            title_hint = (json.loads(
+                (run_dir / "upload_attempted.json").read_text(encoding="utf-8")
+            ).get("title") or "")
+            if _recent_upload_exists(page_check, title_hint):
+                # The upload did go through; record it and treat as done.
+                vid = _extract_id_for_title(page_check, title_hint) or ""
+                url = f"https://www.youtube.com/watch?v={vid}" if vid else ""
+                out_path = run_dir / "post_url.json"
+                if url:
+                    out_path.write_text(json.dumps(
+                        {"status": "uploaded", "visibility": "unlisted",
+                         "url": url}, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+                    return {"post_url": str(out_path), "url": url,
+                            "visibility": "unlisted"}
         except Exception as exc:  # noqa: BLE001
             raise ExecutorError(
                 f"Previous upload may have succeeded but cannot be confirmed; "
@@ -277,9 +438,19 @@ def run(ctx, inputs, run_dir, session):
         time.sleep(config.YOUTUBE_POST_CLICK_SLEEP_S)
     time.sleep(config.YOUTUBE_UI_SETTLE_S)
 
-    # 5. Title
+    # 5. Title. YouTube pre-fills the title from the source filename
+    #    (final.mp4 -> "final"); clear the box first so we don't end up with a
+    #    "final<Script Title>" prefix on every upload (R6 surveillance finding).
     title_box = locs.resolve(page, "title_box")
     ux.click(title_box, description="title box", loc_group="title_box")
+    try:
+        title_box.fill("", timeout=8000)
+    except Exception:  # noqa: BLE001
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Delete")
+        except Exception:  # noqa: BLE001
+            pass
     ux.type_text(title_box, title, delay_ms=20, description="title", loc_group="title_box")
 
     # 6. Description
@@ -317,17 +488,32 @@ def run(ctx, inputs, run_dir, session):
     ux.click(done, description="publish/done", loc_group="done_publish")
     time.sleep(config.YOUTUBE_POST_PUBLISH_SLEEP_S)
 
-    # 11. Extract URL
-    url = _extract_url(page)
+    # 11. Extract URL — title-scoped only. A page-wide first-match scan latched
+    #     onto a stale video id across many runs; we now require the link's row
+    #     to name this run's title, then patiently watch the Studio list for the
+    #     still-processing upload (which is why an immediate scan finds nothing).
+    recognized = _known_video_ids(run_dir)
+    vid = (
+        _extract_id_for_title(page, title, scope="ytcp-uploads-dialog")
+        or _extract_id_for_title(page, title, scope="body")
+    )
+    if vid and vid in recognized:
+        log.warning("Dialog/body link named id '%s' already recorded by an "
+                    "earlier run; treating as stale", vid)
+        vid = None
+    if vid is None:
+        log.info("New upload not yet capturable from current page; watching the "
+                 "Studio Videos list for '%s'", title)
+        vid = _id_from_video_list(page, title,
+                                  timeout_s=config.YOUTUBE_PUBLISH_LISTING_WAIT_S)
+    if vid and vid in recognized:
+        log.warning("Studio list link named id '%s' already recorded by an "
+                    "earlier run; refusing to record a duplicate", vid)
+        vid = None
+    url = f"https://www.youtube.com/watch?v={vid}" if vid else None
     if url is None:
-        log.warning("Could not extract video URL directly; scanning page text")
-        try:
-            body = page.locator("body").inner_text(timeout=4000)
-            m = re.search(r"(https?://(?:www\.)?youtube\.com/(?:watch\?v=|shorts/)[^\s\"']+)", body)
-            if m:
-                url = m.group(1)
-        except Exception:  # noqa: BLE001
-            pass
+        log.warning("Could not extract a non-colliding video URL for title '%s'",
+                    title)
 
     # close dialog
     try:
