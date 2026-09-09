@@ -122,9 +122,12 @@ ALLOW_EXTERNAL_ADAPTERS = (
 DEFAULT_WORKFLOW = "faceless_short"
 DEFAULT_VISIBILITY = "unlisted"      # unlisted, private, public
 
-# Scripting LLM provider ("ai_studio" is the user's preferred; the adapter falls
-# back to the no-login chain when AI Studio isn't signed in).
-LLM_PROVIDER = "ai_studio"
+# Scripting LLM provider. "gemini" (web guest, no login) is the default because
+# Google gated Gemini 3 Flash Preview in the free AI Studio Playground behind a
+# Google AI Plan / API key. Pin AUTOMATO_LLM_PROVIDER=ai_studio to use a
+# logged-in AI Studio with a paid plan; otherwise the adapter tries the
+# preferred provider first, then falls back through the no-login chain.
+LLM_PROVIDER = "gemini"
 
 # No-login LLM fallback chain (R6): tried in order after the user's preferred
 # provider. All are login-free web chat UIs: duck.ai, Ask Brave, Gemini (guest,

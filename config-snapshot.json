@@ -14,7 +14,7 @@
   "TTS_PROVIDER": "auto",
   "TTS_BROWSER_TIMEOUT_S": 120,
   "EDGE_TTS_VOICE": "en-US-ChristopherNeural",
-  "LLM_PROVIDER": "ai_studio",
+  "LLM_PROVIDER": "gemini",
   "DEFAULT_WORKFLOW": "faceless_short",
   "DEFAULT_VISIBILITY": "unlisted",
   "RETRY_ATTEMPTS": 4

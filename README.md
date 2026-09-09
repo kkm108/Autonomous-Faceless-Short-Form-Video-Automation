@@ -66,7 +66,7 @@ If the browser can't be found, add `--browser chromium` and run
 
 | Stage | Adapter | Provider | Needs login? |
 |---|---|---|---|
-| Scripting | `scripting.generic_llm` | AI Studio, then a no-login fallback chain | AI Studio optional |
+| Scripting | `scripting.generic_llm` | Gemini web guest → duck.ai → Ask Brave → ChatGPT (no-login); AI Studio optional | No |
 | Assets | `assets.perchance_images` | Perchance free image generator | No |
 | Voiceover | `tts.kokoro_tts` | SoundTools (browser) → edge-tts → pyttsx3 | No |
 | Assembly | `assembly.ffmpeg` | Local FFmpeg + Pillow (no network) | — |
@@ -196,13 +196,14 @@ python -m automato login ai_studio    # optional (preferred scripting provider)
 python -m automato login perchance    # not needed — public generator
 ```
 
-If AI Studio is **not** signed in, scripting falls through automatically to the
-no-login chain — you can ship a fully working pipeline with *zero* sign-ins except
-YouTube:
+Scripting **defaults to the no-login chain** (`gemini` preferred) — Google gated
+the free AI Studio Playground's default model behind a Google AI Plan / API key, so
+AI Studio is only used when you pin `AUTOMATO_LLM_PROVIDER=ai_studio` with a paid
+plan. You can ship a fully working pipeline with *zero* sign-ins except YouTube:
 
-1. `duckai` (duck.ai)
-2. `ask_brave` (Ask Brave) — no account
-3. `gemini` (Gemini web guest, base Flash) — no account
+1. `gemini` (Gemini web guest, base Flash) — no account, default
+2. `duckai` (duck.ai)
+3. `ask_brave` (Ask Brave) — no account
 4. `chatgpt` (ChatGPT web guest) — no account, region-gated, **last resort**
 
 Set your own order with `AUTOMATO_LLM_NO_LOGIN_CHAIN="duckai,gemini,ask_brave,chatgpt"`.
@@ -288,7 +289,7 @@ the full, current list:
 |---|---|
 | `AUTOMATO_VISIBILITY` | `public\|unlisted\|private` default for `run`. |
 | `AUTOMATO_TTS_PROVIDER` | TTS backend default (auto chain). |
-| `AUTOMATO_LLM_PROVIDER` | Preferred scripting provider (`ai_studio` or a chain member). |
+| `AUTOMATO_LLM_PROVIDER` | Preferred scripting provider (`gemini` — no login — by default; `ai_studio` requires a paid-gated login). |
 | `AUTOMATO_LLM_NO_LOGIN_CHAIN` | Comma-separated order of the no-login fallbacks. |
 | `AUTOMATO_BROWSER` / `AUTOMATO_BRAVE_PATH` | Engine + Brave binary path. |
 | `AUTOMATO_HEADLESS_MODE` | `headed\|new\|full` default. |
@@ -407,9 +408,10 @@ Full how-to (forking, diffing configs, relocating): [`GUIDE_CUSTOMIZATION.md`](G
 uses. You sign in to your own accounts; the only "cost" is your own browser
 sessions. Assembly is local.
 
-**Do I need to sign in to anything besides YouTube?** No. AI Studio is optional;
-without it, scripting uses the no-login chain (duck.ai → Ask Brave → Gemini →
-ChatGPT). Perchance, SoundTools, and edge-tts need nothing.
+**Do I need to sign in to anything besides YouTube?** No. Scripting defaults to
+Gemini web guest (no login), falling through to duck.ai → Ask Brave → ChatGPT.
+AI Studio is only used if you pin `AUTOMATO_LLM_PROVIDER=ai_studio`. Perchance,
+SoundTools, and edge-tts need nothing.
 
 **Where do my sessions live?** `profiles/<provider>/` (local-only, never
 committed — the pre-commit guard blocks it). Backups bundle these encrypted.
@@ -451,6 +453,7 @@ way to decrypt.
 | Run hangs showing a CAPTCHA | Challenge detection paused the run for a human (by design, never auto-solved). In headless it fails fast; in headed mode solve it, or set `AUTOMATO_CHALLENGE_CHECK=0` only if you know the site. |
 | `run.lock` refuses a second run | Another run/process is live, or a stale lock within its window. Wait out `RUN_LOCK_STALE_S` or clear `output/run.lock` if you're sure no process is running. |
 | Scripting produced no parseable script | Model ignored the delimited format. It retries and falls through the chain; improve the preamble in `script_prompts.py` for permanent fixes. |
+| AI Studio shows "Gemini 3 Flash Preview … Google AI Plan or API key" | Google gated the free Playground's default model. The engine already defaults away from AI Studio (`gemini` web guest first). Pin `AUTOMATO_LLM_PROVIDER=ai_studio` only if your account has a paid Google AI plan. |
 | Images identical or too slow | Batching mis-set: `AUTOMATO_PERCHANCE_NUM_IMAGES=0` disables batching (slower but more varied); raise it for speed. Shape `512x768` = portrait. Genuine "same image" repeats are per-prompt variation noise — vary the prompt string. |
 | Voiceover silent / all providers failed | Works offline-only `--tts pyttsx3` last; check `ffprobe -i voiceover.wav` exists and `EDGE_TTS_VOICE` is a valid voice; network needed for SoundTools/edge-tts. |
 | Backup won't decrypt on another machine | Passphrase mismatch or tampering. Restore refuses CRC/checksum mismatches by design — re-export with the correct passphrase. |

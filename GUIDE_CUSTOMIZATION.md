@@ -85,7 +85,8 @@ python -m automato run "5 high-protein meal-prep ideas" --workflow meal_prep --v
 Common knobs per objective:
 
 ```python
-LLM_PROVIDER = "ai_studio"          # "ai_studio" (needs login) | "duckai" (no login)
+LLM_PROVIDER = "gemini"              # default: no-login chain (gemini first)
+                                     # "ai_studio" (needs paid-gated login) | any chain member
 TTS_PROVIDER  = "auto"              # auto | soundtools | edge_tts | pyttsx3
 EDGE_TTS_VOICE = "en-US-ChristopherNeural"   # pick a voice matching the niche's tone
 DEFAULT_VISIBILITY = "unlisted"     # unlisted | private | public

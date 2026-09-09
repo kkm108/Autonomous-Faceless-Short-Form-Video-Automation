@@ -93,9 +93,10 @@ def test_to_dict_roundtrip():
 
 
 def test_env_overrides_llm_provider(monkeypatch):
-    # R6: forcing the scripting provider to a no-login chain entry skips AI
-    # Studio start-to-finish, which is how the chain is validated run-to-run.
-    assert RunSettings.defaults().llm_provider == "ai_studio"
+    # Default resolves to the no-login chain preferred provider (gemini), since
+    # Google gated the free AI Studio Playground. Pinning to a chain entry skips
+    # AI Studio start-to-finish, which is how the chain is validated run-to-run.
+    assert RunSettings.defaults().llm_provider == "gemini"
     monkeypatch.setenv("AUTOMATO_LLM_PROVIDER", "ask_brave")
     assert RunSettings.defaults().llm_provider == "ask_brave"
     monkeypatch.setenv("AUTOMATO_LLM_PROVIDER", "chatgpt")
