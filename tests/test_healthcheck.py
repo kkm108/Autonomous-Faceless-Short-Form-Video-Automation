@@ -35,7 +35,11 @@ class _FakePage:
 
 def test_probe_registry_covers_all_providers():
     probes = _make_probes()
-    assert [p["name"] for p in probes] == ["youtube", "ai_studio", "tts", "perchance"]
+    # R6 added the three no-login scripting chats to the drift check.
+    assert [p["name"] for p in probes] == [
+        "youtube", "ai_studio", "tts", "perchance",
+        "ask_brave", "gemini", "chatgpt",
+    ]
     for p in probes:
         assert p["url"] and p["groups"]
 

@@ -19,6 +19,11 @@ Environment overrides (each also has a CLI flag):
   * ``AUTOMATO_RECOVERY_ENABLED`` (true/false)
   * ``AUTOMATO_CHALLENGE_CHECK``  (true/false)
   * ``AUTOMATO_ANTI_AUTOMATION``  (true/false)
+
+``AUTOMATO_LLM_PROVIDER`` (no CLI flag) overrides the scripting LLM provider:
+  ``ai_studio`` or any no-login chain entry (``duckai``/``ask_brave``/``gemini``/
+  ``chatgpt``). Setting a no-login provider starts the scripting chain straight at
+  that provider, i.e. it *skips* AI Studio entirely (used for chain validation).
 """
 from __future__ import annotations
 
@@ -128,7 +133,9 @@ class RunSettings:
                                      config.CHALLENGE_CHECK),
             anti_automation=env_bool("AUTOMATO_ANTI_AUTOMATION",
                                      config.ANTI_AUTOMATION),
-            llm_provider=getattr(config, "LLM_PROVIDER", "ai_studio"),
+            llm_provider=os.environ.get(
+                "AUTOMATO_LLM_PROVIDER",
+                getattr(config, "LLM_PROVIDER", "ai_studio")),
         )
 
     @classmethod

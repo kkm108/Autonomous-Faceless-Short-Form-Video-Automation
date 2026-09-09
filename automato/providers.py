@@ -60,4 +60,10 @@ def register_all() -> None:
                       login_hint="Perchance requires no login.")
     register_provider("tts", auth_check=None,
                       login_hint="In-browser TTS requires no login.")
+    # R6 no-login chat providers need no login (persistent only so health-check
+    # and session plumbing treat them uniformly; the scripting stage actually
+    # drives Gemini/ChatGPT/Ask Brave through the ai_studio session).
+    for name in ("ask_brave", "gemini", "chatgpt"):
+        register_provider(name, auth_check=None,
+                          login_hint=f"{name} requires no login.")
     log.debug("Registered provider sessions.")

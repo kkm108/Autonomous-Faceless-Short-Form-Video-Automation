@@ -50,6 +50,7 @@ def _make_probes():
     from .adapters.publish import youtube_studio
     from .adapters.scripting import generic_llm
     from .adapters.tts import kokoro_tts
+    from .llm import no_login
 
     return [
         {
@@ -91,6 +92,32 @@ def _make_probes():
             "url": "https://perchance.org/ai-text-to-image-generator",
             "locs": {},
             "groups": [("generator_frame", "probe")],
+        },
+        # R6 no-login scripting providers: keep their login-free web chats in the
+        # monthly drift check so the editor a selector change is caught on a
+        # schedule, not surprise-mid-pipeline as a runtime fallback failure. Only
+        # the composer is probed: submit buttons are text-gated (hidden on an
+        # empty composer), so probing them would produce noise.
+        {
+            "name": "ask_brave",
+            "session": "ask_brave",
+            "url": no_login.ASK_BRAVE_URL,
+            "locs": {"compose": no_login.BRAVE_COMPS},
+            "groups": [("compose", "resolve")],
+        },
+        {
+            "name": "gemini",
+            "session": "gemini",
+            "url": no_login.GEMINI_URL,
+            "locs": {"compose": no_login.GEMINI_COMPS},
+            "groups": [("compose", "resolve")],
+        },
+        {
+            "name": "chatgpt",
+            "session": "chatgpt",
+            "url": no_login.CHATGPT_URL,
+            "locs": {"compose": no_login.CHATGPT_COMPS},
+            "groups": [("compose", "resolve")],
         },
     ]
 
