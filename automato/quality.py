@@ -79,7 +79,15 @@ def gate_assets(outputs: Dict[str, Any],
     """At least ``MIN_IMAGE_FRACTION`` of requested assets must be captured.
 
     A total (0 images) capture is a hard-fail; a partial shortfall is a soft-fail.
+
+    R8-B1: a ``degraded_reason`` output key (set when the assets stage used the
+    keyless fallback provider) is an immediate soft-fail: fallback images may
+    carry watermarks or be prompt-independent, so such a run must not go live
+    unreviewed.
     """
+    degraded = outputs.get("degraded_reason")
+    if degraded:
+        return QualityGate(False, f"assets fell back to another provider: {degraded}")
     files = outputs.get("image_files") or []
     if isinstance(files, str):
         assets = Path(files)

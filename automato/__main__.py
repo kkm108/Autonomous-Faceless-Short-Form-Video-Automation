@@ -201,10 +201,65 @@ def cmd_trend(args) -> int:
     return 0
 
 
+def cmd_plan(args) -> int:
+    """R8-A5: dry-run planner. Print EXACTLY how a run would route before it
+    touches a browser or spends an API credit: resolved channel, scripting
+    language + tone, TTS provider chain + Edge voice, music/thumbnail switches.
+    The numbers shown are the ones the run will actually use (same registry)."""
+    from . import channels
+    from .adapters.assembly import ffmpeg
+    from .adapters.tts import routing
+
+    settings = RunSettings.from_args(args)
+    topic = args.topic or ""
+    channel = channels.resolve_channel_name(topic,
+                                            explicit=settings.channel_name)
+    language = channels.resolve_language(channel, topic)
+    tone = channels.tone_for(channel)
+    chain = routing.build_tts_chain(topic or "sample text", settings.tts_provider,
+                                    language=language)
+    voice = routing.edge_voice_for(language)
+    music = ffmpeg._pick_music()
+
+    print(f"Topic:            {topic or '<Ask Studio will derive one>'}")
+    print(f"Workflow:         {args.workflow}")
+    print(f"Channel:          {channel}  "
+          f"(default: {config.CHANNEL_DEFAULT})")
+    print(f"@channel id:      {channels.channel_id_for(channel)}")
+    print(f"Language:         {language}  (registry)"
+          if channel else f"Language:         {language}  (detected)")
+    print(f"Tone:             {tone or '(none set)'}")
+    print(f"TTS chain:        {' -> '.join(chain)}"
+          + (f"   (voice: {voice})" if "edge_tts" in chain else ""))
+    print(f"Music bed:        {music or '(none found; ducked music disabled)'}")
+    print(f"Thumbnail upload: "
+          f"{'ON (AUTOMATO_UPLOAD_THUMBNAIL)' if config.YOUTUBE_UPLOAD_THUMBNAIL else 'OFF (opt-in)'}")
+    print(f"Publish confirm:  {'on (per-run prompt)' if settings.publish_confirm else 'off (--yes)'}")
+    print(f"Visibility:       {settings.visibility}")
+    ids_known = ", ".join(channels.channel_names())
+    print(f"Allowlist:        {ids_known}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="automato",
                                      description="Autonomous faceless short-form video automation")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_plan = sub.add_parser(
+        "plan",
+        help="R8-A5: dry-run the routing for a topic -- resolved channel, "
+             "language, tone, TTS chain and switches, without touching a browser")
+    p_plan.add_argument("topic", nargs="?", default=None,
+                        help="Seed topic to plan for (omit to show the defaults)")
+    p_plan.add_argument("--channel", default=None,
+                        help="Explicit channel (same allowlist names as 'run')")
+    p_plan.add_argument("--tts", choices=["auto", "soundtools", "edge_tts", "pyttsx3"],
+                        default=None, help="TTS provider (default: auto)")
+    p_plan.add_argument("--workflow", default=config.DEFAULT_WORKFLOW,
+                        help="Workflow manifest name")
+    p_plan.add_argument("-v", "--verbose", action="store_true")
+    p_plan.set_defaults(func=cmd_plan)
 
     p_run = sub.add_parser("run", help="Run the full pipeline. With a topic, that "
                                        "topic is scripted; without one, the Ask "

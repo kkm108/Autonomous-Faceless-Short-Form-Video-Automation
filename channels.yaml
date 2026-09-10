@@ -1,0 +1,49 @@
+# Channel registry (R8-A1): the single source of truth for brand channels.
+#
+# This file replaces the channel data once embedded in automato/config.py.
+# Adding channel #N becomes a DATA edit here, not a code change. The
+# topic->channel routing map, the scripting language, the TTS voice route,
+# caption/thumbnail styling, tone profile and watermark/logo all stem from the
+# SAME entry below (R8-A2), so the three consumers can never silently disagree.
+#
+# Schema (one entry per channel):
+#   <name>:                      # allowlist name -- what --channel / topic routing use
+#     channel_id: "UC..."        # validated, exactly 24 alphanumerics / _ - (validated at load)
+#     language: en               # en | es | hi | sa - drives scripting prompt + TTS voice route
+#     keywords: [..]             # topic -> channel routing keywords (case-insensitive substring)
+#     branding:
+#       logo: assets/brand/<name>/logo.png   # watermark overlay (optional; skipped if absent)
+#       accent_color: "#8a6d3b"  # caption text + thumbnail accent
+#       font: assets/brand/<name>/font.ttf   # caption/thumbnail font (optional; skipped if absent)
+#       tone: "..."              # injected verbatim into the scripting LLM system prompt
+#
+# Resolution rules (R8-A4): `channels.resolve_channel_name()` scans entries in
+# this file's order and returns the FIRST channel whose keyword matches; that is
+# the documented, deterministic tie-break (explicit --channel always wins first).
+#
+# Language routing (R8-A2): an entry's `language` field is the single fact that
+# (a) chooses the publish channel, (b) requests the scripting LLM write in that
+# language, and (c) selects the TTS voice route / Edge neural voice.
+default_channel: main
+
+channels:
+  main:
+    channel_id: "UCSH1A5BGmsdNq1oqS1HHLpg"
+    language: en
+    keywords: [ai, data, coding, program, puzzle, number, challenge, tech, reflex]
+    branding:
+      logo: assets/brand/main/logo.png
+      accent_color: "#b3d4ff"
+      font: assets/brand/main/font.ttf
+      tone: "curious, upbeat and direct - a friendly tech explainer that makes one idea feel exciting, with punchy accessible language"
+
+  es-finance:
+    channel_id: "UCf0SpoFyFHpegpgBGyRK77w"
+    language: es
+    keywords: [finance, money, invest, stock, loan, rent, mortgage, alquilar,
+               comprar]
+    branding:
+      logo: assets/brand/es-finance/logo.png
+      accent_color: "#ffd9a0"
+      font: assets/brand/es-finance/font.ttf
+      tone: "calm, trustworthy and practical - plain Spanish that empowers the viewer with a clear next step, avoiding jargon"

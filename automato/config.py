@@ -11,12 +11,60 @@ import os
 import sys
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent.parent
 
 PROFILES_DIR = ROOT / "profiles"
 OUTPUT_DIR = ROOT / "output"
 WORKFLOWS_DIR = ROOT / "workflows"
 STATE_FILE = OUTPUT_DIR / "state.json"
+ASSETS_DIR = ROOT / "assets"
+
+# Channel registry (R8-A1): the structured data file that replaced the inline
+# CHANNEL_WHITELIST/CHANNEL_MAP dicts. Add a channel by editing the YAML, not
+# this module. Override the file location with AUTOMATO_CHANNELS_FILE.
+CHANNELS_FILE = Path(
+    os.environ.get("AUTOMATO_CHANNELS_FILE", "").strip() or (ROOT / "channels.yaml")
+)
+
+
+def _load_channel_registry() -> dict:
+    """Parse the channel registry file (R8-A1).
+
+    Returns ``{"default_channel": str, "channels": {name: profile}}``. An
+    unreadable or missing registry is a hard misconfiguration: the engine's
+    whole multi-channel routing (publish channel, scripting language, TTS voice,
+    branding) derives from this one file, so fail loudly rather than silently
+    defaulting to a one-channel world.
+    """
+    if not CHANNELS_FILE.is_file():
+        raise FileNotFoundError(
+            f"Channel registry not found: {CHANNELS_FILE}. R8 migrated the "
+            "channel allowlist into channels.yaml; restore it or point "
+            "AUTOMATO_CHANNELS_FILE at a valid registry."
+        )
+    try:
+        data = yaml.safe_load(CHANNELS_FILE.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Channel registry {CHANNELS_FILE} is not valid YAML: {exc}")
+    channels = data.get("channels") or {}
+    if not isinstance(channels, dict) or not channels:
+        raise ValueError(
+            f"Channel registry {CHANNELS_FILE} must declare a non-empty "
+            "'channels' mapping."
+        )
+    for name, profile in channels.items():
+        cid = (profile or {}).get("channel_id") or ""
+        if not cid or len(cid) != 24:
+            raise ValueError(
+                f"Channel '{name}' in {CHANNELS_FILE} has an invalid channel_id "
+                f"{cid!r}; a channel id is exactly 24 alphanumerics/_-."
+            )
+    return {
+        "default_channel": data.get("default_channel") or "main",
+        "channels": channels,
+    }
 
 # Browser settings
 BROWSER_CHANNEL = "msedge"          # used only when browser = edge/chrome channel launch
@@ -158,6 +206,16 @@ VAGDHENU_ENABLED = (
 TTS_BROWSER_TIMEOUT_S = 120
 # edge-tts voice (high-quality neural voice used by Microsoft Edge read-aloud).
 EDGE_TTS_VOICE = "en-US-ChristopherNeural"
+# R8-A2: language -> Edge neural voice. The channel registry's `language` field
+# (single source of truth) selects the voice; unknown languages fall back to
+# EDGE_TTS_VOICE.
+EDGE_TTS_VOICES = {
+    "en": EDGE_TTS_VOICE,
+    "es": "es-ES-AlvaroNeural",
+    "hi": "hi-IN-MadhurNeural",
+}
+# Languages the registry may route to (publish channel + script + TTS voice).
+KNOWN_LANGUAGES = ("en", "es", "hi", "sa")
 
 # Local ffmpeg/ffprobe budget (R1-W7): a stuck encode must not hang the pipeline
 # forever; this is the iteration timeout for each subprocess call.
@@ -195,37 +253,35 @@ YOUTUBE_PUBLISH_LISTING_WAIT_S = 420
 YOUTUBE_PUBLISH_READY_WAIT_S = 300
 
 
-# ---- Brand-channel routing (R7) ----
-# The signed-in Google identity carries MULTIPLE channels: a main channel plus
-# brand channels. Both ideation (Ask Studio) and publish are scoped to the
-# channel that is *active* in Studio, and the active channel is read
-# deterministically from the Studio URL's /channel/<id> segment — no menu
-# scraping required. Override with AUTOMATO_CHANNEL_WHITELIST (JSON object
-# mapping names to 24-char channel ids).
+# ---- Brand-channel routing (R7/R8) ----
+# R8-A1: the allowlist, topic map and per-channel profiles now all derive from
+# the external channel registry (channels.yaml), keeping the resolution logic in
+# channels.py unchanged in *shape* while the data lives in one hand-editable
+# file. The AUTOMATO_CHANNEL_WHITELIST / AUTOMATO_CHANNEL_MAP environment
+# overrides (JSON, re-read per call in channels.py) still win for the two legacy
+# shapes when set.
+_CHANNEL_REGISTRY = _load_channel_registry()
+CHANNEL_DEFAULT = _CHANNEL_REGISTRY["default_channel"]
+# name -> full registry entry (channel_id, language, keywords, branding).
+CHANNEL_PROFILES = dict(_CHANNEL_REGISTRY["channels"])
+# {name: 24-char channel id} (same shape as the pre-R8 dict; env override wins).
 _CHANNEL_WHITELIST_ENV = os.environ.get("AUTOMATO_CHANNEL_WHITELIST", "").strip()
 CHANNEL_WHITELIST = (
     json.loads(_CHANNEL_WHITELIST_ENV)
     if _CHANNEL_WHITELIST_ENV
-    else {
-        "main": "UCSH1A5BGmsdNq1oqS1HHLpg",      # AI.Powered.Skills @AIPoweredSkills
-        "es-finance": "UCf0SpoFyFHpegpgBGyRK77w",
-    }
+    else {name: (profile.get("channel_id") or "")
+          for name, profile in CHANNEL_PROFILES.items()}
 )
-# The safe default when a topic maps to nothing: always the main channel.
-CHANNEL_DEFAULT = "main"
-# topic-keyword -> channel name; first keyword hit wins (case-insensitive). Used
-# to route a seeded or ideated topic to the right brand channel. Override with
+# topic-keyword -> channel name; first keyword hit wins (case-insensitive),
+# scanned in registry order (the deterministic R8-A4 tie-break). Used to route
+# a seeded or ideated topic to the right brand channel. Override with
 # AUTOMATO_CHANNEL_MAP (JSON object mapping channel names to keyword lists).
 _CHANNEL_MAP_ENV = os.environ.get("AUTOMATO_CHANNEL_MAP", "").strip()
 CHANNEL_MAP = (
     json.loads(_CHANNEL_MAP_ENV)
     if _CHANNEL_MAP_ENV
-    else {
-        "es-finance": ("finance", "money", "invest", "stock", "loan", "rent",
-                       "mortgage", "alquilar", "comprar"),
-        "main": ("ai", "data", "coding", "program", "puzzle", "number",
-                 "challenge", "tech", "reflex"),
-    }
+    else {name: tuple(profile.get("keywords") or ())
+          for name, profile in CHANNEL_PROFILES.items()}
 )
 # confirm-before-publish: the publish stage asks the operator for an explicit
 # "y" immediately before clicking Publish, and ABORTS on anything else. This is
@@ -252,6 +308,34 @@ ASK_STUDIO_QUESTION = (
 ASK_STUDIO_REPLY_WAIT_S = 240
 # How long to wait for the chat composer to appear after opening the drawer.
 ASK_STUDIO_COMPOSER_WAIT_S = 30
+
+
+# ---- R8-B3/B4: background music + SFX ----
+# Drop properly-licensed (CC-BY/CC0, clearly documented) background tracks into
+# ASSETS_DIR/music; the assembly stage ducks them under the voiceover. Disable
+# with AUTOMATO_MUSIC_ENABLED=0.
+_MUSIC_ENV = os.environ.get("AUTOMATO_MUSIC_ENABLED", "").strip().lower()
+MUSIC_ENABLED = True if not _MUSIC_ENV else _MUSIC_ENV not in ("0", "false", "no",
+                                                            "off")
+MUSIC_DIR = ASSETS_DIR / "music"
+# Optional per-slide sound effects: assets/sfx/sfx_<i>.(mp3|wav) keyed to slide
+# transitions; mixed at the start of each slide's window when present.
+SFX_DIR = ASSETS_DIR / "sfx"
+# Ducking levels for the narration-driven sidechain compressor (R8-B3).
+MUSIC_DUCK_ATTACK_MS = 20
+MUSIC_DUCK_RELEASE_MS = 300
+MUSIC_DUCK_RATIO = 8
+MUSIC_BED_LEVEL = 0.35          # post-duck music volume (0..1)
+
+# ---- R8-B7: custom thumbnail ----
+# Produce a channel-branded thumbnail, and OPTIONALLY upload it in the publish
+# stage. The upload interaction is new Studio automation and is opt-in until it
+# has been live-validated; the thumbnail artifact is always built. Enable with
+# AUTOMATO_UPLOAD_THUMBNAIL=1.
+YOUTUBE_UPLOAD_THUMBNAIL = (
+    os.environ.get("AUTOMATO_UPLOAD_THUMBNAIL", "").strip().lower()
+    in ("1", "true", "yes")
+)
 
 
 def ensure_dirs() -> None:

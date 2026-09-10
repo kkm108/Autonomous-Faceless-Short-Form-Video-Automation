@@ -109,20 +109,24 @@ def _browser_soundtools(page, text: str, run_dir: Path, timeout_s: int,
     raise RuntimeError("SoundTools did not produce a downloadable audio file in time")
 
 
-def _edge_tts(text: str, run_dir: Path) -> Path:
+def _edge_tts(text: str, run_dir: Path, voice: str) -> Path:
     """High-quality neural TTS via Microsoft Edge voices (needs internet).
 
-    Run the asyncio loop in a worker thread so we never clash with a live
-    Playwright sync event loop on the main thread.
+    Uses edge-tts' streaming API so we get BOTH the audio file and per-word
+    start/end timings (R8-B2). The default ``.save()`` discards WordBoundary
+    data; streaming lets the assembly stage sync captions to reality instead of
+    dividing the timeline equally. Run the asyncio loop in a worker thread so we
+    never clash with a live Playwright sync event loop on the main thread.
     """
     import threading
 
     mp3 = run_dir / "voiceover_edge.mp3"
+    words_path = run_dir / "word_timings.json"
     err: list[BaseException] = []
 
     def _worker():
         try:
-            asyncio.run(_edge_save(text, str(mp3)))
+            asyncio.run(_edge_stream_save(text, str(mp3), voice, str(words_path)))
         except BaseException as exc:  # noqa: BLE001
             err.append(exc)
 
@@ -133,13 +137,41 @@ def _edge_tts(text: str, run_dir: Path) -> Path:
         raise err[0]
     if not mp3.exists() or mp3.stat().st_size == 0:
         raise RuntimeError("edge-tts produced no audio")
-    log.info("Voiceover generated via edge-tts: %s", mp3.name)
+    log.info("Voiceover generated via edge-tts (%s): %s", voice, mp3.name)
     return mp3
 
 
-async def _edge_save(text: str, out: str):
+async def _edge_stream_save(text: str, out: str, voice: str,
+                            words_out: str) -> None:
+    """Stream edge-tts into ``out``, recording WordBoundary timings.
+
+    WordBoundary offsets arrive in 100-nanosecond units (Speech protocol); we
+    normalise to seconds so the assembly/timing consumers stay unit-free.
+    """
     import edge_tts
-    await edge_tts.Communicate(text, config.EDGE_TTS_VOICE).save(out)
+
+    audio = bytearray()
+    words: list = []
+    comm = edge_tts.Communicate(text, voice)
+    async for chunk in comm.stream():
+        kind = chunk.get("type")
+        if kind == "audio":
+            audio.extend(chunk.get("data") or b"")
+        elif kind == "WordBoundary":
+            offset = int(chunk.get("offset") or 0)
+            duration = int(chunk.get("duration") or 0)
+            words.append({
+                "word": chunk.get("text") or "",
+                "start_s": round(offset / 10_000_000, 4),
+                "end_s": round((offset + duration) / 10_000_000, 4),
+            })
+    Path(out).write_bytes(bytes(audio))
+    Path(words_out).write_text(json.dumps({
+        "provider": "edge_tts",
+        "voice": voice,
+        "words": words,
+        "total_s": round(words[-1]["end_s"], 4) if words else 0.0,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _pyttsx3(text: str, run_dir: Path) -> Path:
@@ -163,9 +195,16 @@ def run(ctx, inputs, run_dir, session=None):
         raise ValueError("No spoken_script in script for TTS stage")
 
     provider = (ctx.settings.tts_provider or "auto").strip().lower()
-    from .routing import build_tts_chain
+    from ...channels import resolve_language
+    from .routing import build_tts_chain, detect_language, edge_voice_for
 
-    chain = build_tts_chain(text, provider)
+    # R8-A2: the channel registry's language is the single fact driving the
+    # provider chain and the Edge voice; text detection only remains as the
+    # no-channel fallback.
+    language = (resolve_language(ctx.settings.channel_name, text) if ctx else
+                (detect_language(text) or "en"))
+    chain = build_tts_chain(text, provider, language=language)
+    voice = edge_voice_for(language)
 
     page = None
     if session is not None:
@@ -174,6 +213,7 @@ def run(ctx, inputs, run_dir, session=None):
         except Exception:  # noqa: BLE001
             page = None
 
+    used_method = None
     for method in chain:
         try:
             if method == "soundtools":
@@ -183,7 +223,7 @@ def run(ctx, inputs, run_dir, session=None):
                                        config.TTS_BROWSER_TIMEOUT_S,
                                        settings=ctx.settings)
             elif method == "edge_tts":
-                path = _edge_tts(text, run_dir)
+                path = _edge_tts(text, run_dir, voice)
             elif method == "pyttsx3":
                 path = _pyttsx3(text, run_dir)
             elif method == "vagdhenu":
@@ -195,10 +235,26 @@ def run(ctx, inputs, run_dir, session=None):
                     "in the pipeline")
             else:
                 raise ValueError(f"Unknown TTS provider: {method}")
-            return {"audio": str(path)}
+            used_method = method
+            break
         except Exception as exc:  # noqa: BLE001
             log.warning("TTS provider '%s' failed: %s", method, exc)
             # last-chance 'auto' is pyttsx3 which is offline; if even that fails,
             # propagate the error (nothing else to try).
 
-    raise RuntimeError("All TTS providers failed")
+    if used_method is None:
+        raise RuntimeError("All TTS providers failed")
+
+    # Always ship a word-timings sidecar (R8-B2): real WordBoundary data when
+    # edge-tts served the run, otherwise an honest "no real timing" marker the
+    # assembly stage turns into its documented per-slide estimation. This keeps
+    # the manifest binding stable across every provider.
+    timings_path = run_dir / "word_timings.json"
+    if not timings_path.exists():
+        timings_path.write_text(json.dumps({
+            "provider": used_method,
+            "voice": voice if used_method == "edge_tts" else None,
+            "words": [],
+            "estimated": True,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"audio": str(path), "word_timings": str(timings_path)}

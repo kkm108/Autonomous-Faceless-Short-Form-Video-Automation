@@ -298,10 +298,62 @@ def run(ctx, inputs, run_dir, session):
                      fname.name, len(data))
         time.sleep(config.PERCHANCE_UI_SETTLE_S)
 
+    rescued = 0
+    if remaining > 0:
+        # B1 rescue path: Perchance (browser) fell short — fill the gap from the
+        # keyless fallback provider before giving up. A partial rescue still
+        # marks the run DEGRADED so the asset quality gate soft-fails and
+        # publish downgrades to unlisted (fallback images come from the
+        # watermark-carrying anonymous tier or are prompt-independent).
+        try:
+            rescued = _top_up_fallback(assets_dir, saved, prompts, remaining)
+            remaining -= rescued
+        except Exception as exc:  # noqa: BLE001
+            if not saved:
+                raise RuntimeError(
+                    "Perchance produced no saved images and the keyless "
+                    f"fallback could not fill the gap: {exc}")
+            log.error("Fallback top-up failed after %d browser-captured images: "
+                      "%s", len(saved), exc)
+
     if not saved:
         raise RuntimeError("Perchance produced no saved images")
 
-    return {"images": str(assets_dir), "image_files": saved}
+    result = {"images": str(assets_dir), "image_files": saved}
+    if rescued > 0:
+        reason = (f"Perchance fell short ({rescued}/{image_count} images from "
+                  f"the keyless fallback provider)")
+        (run_dir / "degraded_assets.json").write_text(
+            json.dumps({"reason": reason, "rescued": rescued, "saved": len(saved)},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
+        result["degraded_reason"] = reason
+        log.warning("Assets stage degraded: %s", reason)
+    return result
+
+
+def _top_up_fallback(assets_dir: Path, saved: list, prompts: list,
+                     remaining: int) -> int:
+    """B1: fill gaps with a keyless, browser-free fallback provider.
+
+    Returns how many images were appended to ``saved``."""
+    from itertools import cycle
+
+    from .fallback import generate_image
+    prompt_iter = cycle(prompts)
+    done = 0
+    for _ in range(remaining):
+        prompt = next(prompt_iter)
+        out = assets_dir / f"bg_{len(saved):02d}.jpg"
+        try:
+            generate_image(prompt, out)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Fallback image for %r failed: %s", prompt, exc)
+            break
+        saved.append(str(out))
+        done += 1
+        log.warning("Rescue asset %d via fallback provider -> %s",
+                    len(saved), out.name)
+    return done
 
 
 def _decode(b64: str, idx: int) -> Optional[bytes]:

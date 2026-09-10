@@ -15,6 +15,32 @@ def test_whitelist_contains_known_channels():
     assert channels.channel_id_for("es-finance") == "UCf0SpoFyFHpegpgBGyRK77w"
 
 
+def test_registry_loader_snapshots(tmp_path, monkeypatch):
+    reg = tmp_path / "channels.yaml"
+    reg.write_text(
+        'default_channel: brand-a\nchannels:\n'
+        '  brand-a:\n    channel_id: "AAAAAAAAAAAAAAAAAAAAAAAA"\n'
+        '    language: es\n    keywords: [dinero, ahorro]\n'
+        '    branding:\n      accent_color: "#112233"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(config, "CHANNELS_FILE", reg)
+    data = config._load_channel_registry()
+    assert data["default_channel"] == "brand-a"
+    assert data["channels"]["brand-a"]["language"] == "es"
+    assert config.CHANNELS_FILE == reg
+
+
+def test_invalid_registry_channel_id_fails_loudly(tmp_path, monkeypatch):
+    reg = tmp_path / "channels.yaml"
+    reg.write_text(
+        'default_channel: main\nchannels:\n'
+        '  main:\n    channel_id: "not-24-chars"\n',
+        encoding="utf-8")
+    monkeypatch.setattr(config, "CHANNELS_FILE", reg)
+    with pytest.raises(ValueError):
+        config._load_channel_registry()
+
+
 def test_invalid_whitelist_id_raises(monkeypatch):
     monkeypatch.setenv("AUTOMATO_CHANNEL_WHITELIST",
                        '{"main": "not-a-real-id"}')
@@ -43,10 +69,26 @@ def test_resolve_keyword_map_is_case_insensitive():
 
 
 def test_resolve_first_keyword_hit_wins():
-    # Both keywords present -> first mapped channel in CHANNEL_MAP iteration
-    # order wins; the routing map is order-stable (dict insertion order).
+    # R8-A4: first-listed-wins is now DETERMINISTIC — keywords are scanned in
+    # registry order (channels.yaml), so a topic matching both channels'
+    # keywords resolves to whichever channel appears first in the registry
+    # (main, then es-finance), never to iteration order.
     got = channels.resolve_channel_name("ai finance investing money")
-    assert got in ("main", "es-finance")
+    assert got == "main"
+
+
+def test_resolve_profile_lookups_from_registry():
+    # R8-A1/A2: the same registry entry drives routing, scripting language and
+    # TTS voice; lookups for unknown channels degrade to safe defaults.
+    assert channels.language_for("main") == "en"
+    assert channels.language_for("es-finance") == "es"
+    assert channels.language_for("ghost") == "en"
+    assert channels.tone_for("main")
+    brand = channels.branding_for("es-finance")
+    assert brand.get("accent_color") == "#ffd9a0"
+    assert channels.profile_for("main")["channel_id"] == "UCSH1A5BGmsdNq1oqS1HHLpg"
+    assert channels.resolve_language("main", "finance news") == "en"
+    assert channels.resolve_language("es-finance", "finance news") == "es"
 
 
 def test_explicit_channel_wins_over_keywords():

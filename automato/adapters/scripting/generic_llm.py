@@ -18,9 +18,10 @@ import time
 from typing import Optional
 
 from ... import config
+from ...channels import resolve_language, tone_for
 from ...llm import chat as browser_chat
 from ...llm import no_login
-from ...llm.script_prompts import SYS_PREAMBLE, build_user_prompt
+from ...llm.script_prompts import build_system_prompt
 
 log = logging.getLogger(__name__)
 
@@ -176,7 +177,12 @@ def run(ctx, inputs, run_dir, session):
     locs = ProviderLocations(AI_STUDIO_LOCS)
     preferred = ctx.settings.llm_provider or "ai_studio"
     providers = _provider_sequence(preferred)
-    prompt_text = f"{SYS_PREAMBLE}\n\n{build_user_prompt(topic)}"
+    # R8-A2/A3: one registry lookup feeds the scripting prompt's language and
+    # tone, so channel, script language and TTS voice can never disagree.
+    channel = ctx.settings.channel_name
+    language = resolve_language(channel, topic)
+    tone = tone_for(channel) if channel else ""
+    prompt_text = build_system_prompt(topic, language=language, tone=tone)
 
     script = None
     for provider in providers:

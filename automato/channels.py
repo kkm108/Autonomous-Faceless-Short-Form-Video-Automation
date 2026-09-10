@@ -6,8 +6,11 @@ stage are scoped to whatever channel is *active* in Studio, so routing a run to
 the wrong channel is a visible mistake. This module centralises:
 
   * the validated allowlist of known channels + the topic->channel routing map,
+    both derived from the external channel registry (``channels.yaml``, R8-A1),
   * resolving a run's target channel (CLI override > topic-keyword map > safe
     main-channel default),
+  * per-channel profile lookups (language / tone / branding) driven by that SAME
+    registry entry (R8-A2/A3: one fact, three consumers),
   * reading the *active* channel deterministically from the Studio URL's
     ``/channel/<id>`` segment (no account-menu scraping — the URL always carries
     it), and
@@ -16,6 +19,7 @@ the wrong channel is a visible mistake. This module centralises:
 R7 feature set: config-driven topic->channel mapping, validated allowlist, safe
 main-channel default, and a hard verification (abort, never warn) that the
 currently active channel matches the intended target before any upload action.
+R8: registry-backed profiles, deterministic first-match tie-break (A4).
 """
 from __future__ import annotations
 
@@ -111,6 +115,10 @@ def resolve_channel_name(topic: str,
     Precedence: an explicit CLI override -> the topic-keyword map (first
     keyword hit, case-insensitive) -> the safe main-channel default. The
     result is validated against the allowlist.
+
+    R8-A4: the keyword map is scanned in *registry order* (channels.yaml), so
+    when a topic matches several channels the win is deterministic and
+    documented: first-listed-wins. ``explicit`` always overrides keywords.
     """
     if explicit:
         return validate_channel_name(explicit)
@@ -120,6 +128,41 @@ def resolve_channel_name(topic: str,
             if any(kw in lowered for kw in keywords):
                 return validate_channel_name(name)
     return validate_channel_name(default or config.CHANNEL_DEFAULT)
+
+
+# ---------------------------------------------------------------------------
+# R8-A1/A2/A3: per-channel profile lookups from the SAME registry entry that
+# drives routing. One entry in channels.yaml -> publish channel + scripting
+# language/tone + TTS voice route + caption/thumbnail styling.
+# ---------------------------------------------------------------------------
+
+def profile_for(name: str) -> dict:
+    """The full registry entry for ``name`` (or {} for an unknown channel)."""
+    return dict(config.CHANNEL_PROFILES.get(name) or {})
+
+
+def language_for(name: str, default: str = "en") -> str:
+    """The registry `language` for a channel (drives script + TTS route)."""
+    return (profile_for(name).get("language") or default).strip().lower() or default
+
+
+def branding_for(name: str) -> dict:
+    """The registry `branding` block (tone, accent_color, font, logo)."""
+    return dict((profile_for(name).get("branding") or {}))
+
+
+def tone_for(name: str) -> str:
+    """Free-form tone guidance injected into the scripting system prompt."""
+    return (branding_for(name).get("tone") or "").strip()
+
+
+def resolve_language(name: Optional[str], topic: str = "") -> str:
+    """A2's single language fact: registry language when a channel is known,
+    otherwise the coarse text-detection fallback (Sanskrit verse etc.)."""
+    if name:
+        return language_for(name)
+    from .adapters.tts.routing import detect_language
+    return detect_language(topic) or "en"
 
 
 def active_channel_id(page) -> Optional[str]:

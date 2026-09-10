@@ -6,6 +6,11 @@ write the prompt as PURE requirement prose — no worked examples, no angle-brac
 placeholders, no "sample" output — and ask the model to produce a simple, labelled
 plain-text format that we parse robustly on our side.
 
+R8-A2/A3: the channel registry is the single source of truth. Its ``language``
+field selects what language the script must be written in, and its ``tone``
+field is injected verbatim into the system prompt so videos on the same channel
+share a consistent voice instead of whatever the model felt like that run.
+
 Format the model must emit (we parse these locally):
     TITLE|...
     NARRATION|...
@@ -17,25 +22,33 @@ Format the model must emit (we parse these locally):
 """
 from __future__ import annotations
 
+_LANGUAGE_NAMES = {
+    "en": "English",
+    "es": "Spanish",
+    "hi": "Hindi",
+    "sa": "Sanskrit",
+}
+
 SYS_PREAMBLE = (
-    "You are a short-form faceless-video scriptwriter for vertical 9-by-16 videos. "
-    "You will be given a TOPIC and must write a completely original script for it.\n\n"
-    "Write your answer as plain labelled lines. Start each line with exactly one of "
-    "these prefixes, then a pipe bar, then the content: TITLE|, NARRATION|, CAPTION|, "
-    "IMAGE|. Finish with a line containing only END.\n\n"
+    "You are a short-form faceless-video scriptwriter for vertical 9-by-16 "
+    "videos. You will be given a TOPIC and must write a completely original "
+    "script for it.\n\n"
+    "Write your answer as plain labelled lines. Start each line with exactly one "
+    "of these prefixes, then a pipe bar, then the content: TITLE|, NARRATION|, "
+    "CAPTION|, IMAGE|. Finish with a line containing only END.\n\n"
     "Requirements for the content:\n"
-    "- TITLE: a catchy short-form title under 80 characters that clearly names or "
-    "relates to the TOPIC.\n"
+    "- TITLE: a catchy short-form title under 80 characters that clearly names "
+    "or relates to the TOPIC.\n"
     "- NARRATION: the full voiceover, 3 to 6 punchy conversational sentences and "
     "45 to 75 words total, spoken aloud in about 20 to 35 seconds.\n"
-    "- CAPTION: write 4 to 8 of these lines, each a short on-screen phrase of 3 to 9 "
-    "words, in the order the narration is spoken.\n"
-    "- IMAGE: write exactly one of these per CAPTION line, giving a vivid, aesthetic "
-    "visual prompt for a faceless channel with clean backgrounds, cinematic mood, no "
-    "text, no watermarks, and no faces.\n\n"
-    "Write the actual script content only. Do not describe what the fields should be. "
-    "Do not use angle brackets or placeholders. Do not add commentary, bullets, or "
-    "markdown. Output only the labelled lines and END.\n"
+    "- CAPTION: write 4 to 8 of these lines, each a short on-screen phrase of 3 "
+    "to 9 words, in the order the narration is spoken.\n"
+    "- IMAGE: write exactly one of these per CAPTION line, giving a vivid, "
+    "aesthetic visual prompt for a faceless channel with clean backgrounds, "
+    "cinematic mood, no text, no watermarks, and no faces.\n\n"
+    "Write the actual script content only. Do not describe what the fields "
+    "should be. Do not use angle brackets or placeholders. Do not add "
+    "commentary, bullets, or markdown. Output only the labelled lines and END.\n"
 )
 
 
@@ -46,3 +59,28 @@ def build_user_prompt(topic: str) -> str:
         f"TITLE|, NARRATION|, CAPTION|, and IMAGE| lines, finishing with END. The "
         f"title and every caption must clearly relate to {topic}."
     )
+
+
+def build_system_prompt(topic: str, language: str = "en",
+                        tone: str = "") -> str:
+    """The full scripting prompt for one run.
+
+    ``language`` is the channel registry's language (R8-A2) and ``tone`` the
+    registry's branding tone (R8-A3). Both default to neutral so the prompt
+    behaves exactly as before for doubled-up callers.
+    """
+    lang = (language or "en").strip().lower()
+    lang_name = _LANGUAGE_NAMES.get(lang, lang)
+    parts = [
+        SYS_PREAMBLE,
+        f"Write the ENTIRE script in {lang_name}.",
+    ]
+    if tone:
+        parts.append(f"Voice and tone to match: {tone}")
+    parts.append(
+        f"TOPIC: {topic}\n\n"
+        f"Write an original short-form faceless video script about {topic} using the "
+        f"TITLE|, NARRATION|, CAPTION|, and IMAGE| lines, finishing with END. The "
+        f"title and every caption must clearly relate to {topic}."
+    )
+    return "\n\n".join(parts)

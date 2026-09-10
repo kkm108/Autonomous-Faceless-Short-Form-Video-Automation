@@ -31,7 +31,8 @@
         "script": "script.json"
       },
       "outputs": {
-        "audio": "voiceover.wav"
+        "audio": "voiceover.wav",
+        "word_timings": "word_timings.json"
       }
     },
     {
@@ -41,10 +42,16 @@
         "script": "script.json",
         "images": "assets",
         "audio": "voiceover.audio",
+        "timings": "voiceover.word_timings",
         "video": "final.mp4"
       },
       "outputs": {
-        "video": "final.mp4"
+        "video": "final.mp4",
+        "captions": "captions.json",
+        "subtitle_vtt": "captions.vtt",
+        "subtitle_srt": "captions.srt",
+        "thumbnail": "thumbnail.jpg",
+        "metadata": "metadata.json"
       }
     },
     {
@@ -52,7 +59,9 @@
       "adapter": "publish.youtube_studio",
       "inputs": {
         "video": "final.mp4",
-        "script": "script.json"
+        "script": "script.json",
+        "thumbnail": "assemble.thumbnail",
+        "metadata": "assemble.metadata"
       },
       "outputs": {
         "post_url": "post_url.json"

@@ -559,6 +559,54 @@ def _recent_upload_exists(page, title: str, timeout_s: int = 60) -> bool:
     return _omnisearch_ids_for_title(page, title, timeout_s=20) is not None
 
 
+def _upload_thumbnail_if_requested(page, inputs: dict, run_dir: Path) -> bool:
+    """OPT-IN custom-thumbnail upload (R8-B7), strictly best-effort.
+
+    Drives the details-panel thumbnail picker via Playwright's native file
+    chooser. Any failure (absent artifact, changed UI, slow render) only logs a
+    warning and continues without the thumbnail -- a thumbnail must never block
+    the publish that already has a URL.
+    """
+    thumb = inputs.get("thumbnail")
+    thumb_path = Path(thumb) if thumb else None
+    if not thumb_path or not thumb_path.is_file():
+        log.info("Custom thumbnail requested but no thumbnail artifact present; "
+                 "skipping upload")
+        return False
+    try:
+        # The thumbnail picker button sits below the details-panel preview; the
+        # safest seam is YT's native file chooser, so click whatever control
+        # currently exposes it ("Select file" / "Edit" / upload-styled button).
+        triggers = [
+            "ytcp-button:has-text('Select file')",
+            "ytcp-button:has-text('Upload thumbnail')",
+            "ytcp-text-button:has-text('Choose thumbnail')",
+            "ytcp-button:has-text('Edit thumbnail')",
+            "ytcp-text-button:has-text('Edit')",
+        ]
+        trigger = None
+        for sel in triggers:
+            cand = page.locator(sel).first
+            if cand.count() > 0 and cand.is_visible():
+                trigger = cand
+                break
+        if trigger is None:
+            log.info("Thumbnail picker control not found; skipping upload")
+            return False
+        with page.expect_file_chooser(timeout=15000) as fc_info:
+            trigger.click(timeout=10000)
+        chooser = fc_info.value
+        chooser.set_files(str(thumb_path))
+        # Give the preview a moment to render before we move on.
+        time.sleep(config.YOUTUBE_POST_CLICK_SLEEP_S)
+        log.info("Custom thumbnail uploaded: %s", thumb_path.name)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Custom thumbnail upload skipped (%s); publishing continues "
+                    "without it", exc)
+        return False
+
+
 def run(ctx, inputs, run_dir, session):
     video_path = Path(inputs["video"])
     script = json.loads(Path(inputs["script"]).read_text(encoding="utf-8"))
@@ -622,7 +670,14 @@ def run(ctx, inputs, run_dir, session):
                     "from '%s' to 'unlisted'", visibility)
         visibility = "unlisted"
     title = (script.get("title") or "Untitled")[:100]
-    description = "Automated faceless short.\n\n#shorts"
+    # R8-B8: prefer the assembly stage's metadata record (description + tags +
+    # chapters) when present; fall back to the legacy one-liner.
+    from ...metadata import read_metadata
+    meta = read_metadata(inputs.get("metadata", "")) if inputs.get("metadata") else {}
+    if meta.get("title"):
+        title = meta["title"][:100]
+    description = (meta.get("description")
+                   or "Automated faceless short.\n\n#shorts")
 
     page = session.first_page()
     from ...resilience.interaction import ElementInteractor
@@ -692,6 +747,13 @@ def run(ctx, inputs, run_dir, session):
     kids = locs.try_resolve(page, "not_for_kids", timeout=3000)
     if kids is not None:
         ux.click(kids, description="not for kids", loc_group="not_for_kids", force=True)
+
+    # 7b. Custom thumbnail (R8-B7): OPT-IN via config.YOUTUBE_UPLOAD_THUMBNAIL
+    #     because the picker interaction is new Studio automation that has not
+    #     been live-validated; best-effort and strictly non-fatal. The thumbnail
+    #     artifact itself is always produced by the assembly stage.
+    if config.YOUTUBE_UPLOAD_THUMBNAIL:
+        _upload_thumbnail_if_requested(page, inputs, run_dir)
 
     # 8. Next x3
     for step in range(3):
