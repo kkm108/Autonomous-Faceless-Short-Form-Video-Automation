@@ -11,6 +11,7 @@ from automato.adapters.publish.youtube_studio import (
     _extract_id_for_title,
     _id_from_href,
     _known_video_ids,
+    _omnisearch_results,
 )
 
 
@@ -108,3 +109,48 @@ def test_known_video_ids_tolerates_garbage(tmp_path):
     (root / "y" / "post_url.json").write_text(json.dumps(
         {"status": "uploaded"}), encoding="utf-8")
     assert _known_video_ids(exclude_run_dir=root / "z", root=root) == set()
+
+
+def _stub_omnisearch_page(eval_rows):
+    """A page whose omnisearch panel poll returns ``eval_rows`` and whose other
+    page nodes are inert."""
+    page = MagicMock()
+
+    class _SearchButton:
+        first = MagicMock(click=MagicMock())
+
+        def count(self):
+            return 1
+
+    class _Query:
+        first = MagicMock(is_visible=MagicMock(return_value=True),
+                          fill=MagicMock())
+
+        def count(self):
+            return 1
+
+    page.get_by_role = MagicMock(return_value=_SearchButton())
+    page.locator = MagicMock(return_value=_Query())
+    page.keyboard = MagicMock()
+    page.evaluate = MagicMock(return_value=eval_rows)
+    return page
+
+
+def test_omnisearch_results_dedups_by_video_id():
+    # Studio renders the SAME uploaded short in several equivalent rows; the
+    # tuple-vs-string membership check previously let every duplicate through.
+    rows = [
+        {"text": "0:15 Find The Hidden Number Before Time Runs Out Sep 9, 2026",
+         "href": "https://studio.youtube.com/video/1PWa6DEwflU/edit"},
+        {"text": "0:15 Find The Hidden Number Before Time Runs Out Sep 9, 2026",
+         "href": "https://studio.youtube.com/video/1PWa6DEwflU/edit"},
+        {"text": "0:11 Day 15 of 31 Sep 8, 2026",
+         "href": "https://studio.youtube.com/video/lrGZW3FhHGY/edit"},
+    ]
+    page = _stub_omnisearch_page(rows)
+    pairs = _omnisearch_results(page, "Find The Hidden Number")
+    assert [(t, vid) for t, vid in pairs] == [
+        ("0:15 Find The Hidden Number Before Time Runs Out Sep 9, 2026",
+         "1PWa6DEwflU"),
+        ("0:11 Day 15 of 31 Sep 8, 2026", "lrGZW3FhHGY"),
+    ]

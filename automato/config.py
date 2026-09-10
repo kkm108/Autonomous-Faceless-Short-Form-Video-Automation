@@ -187,6 +187,12 @@ YOUTUBE_POST_PUBLISH_SLEEP_S = 6      # settle after clicking Publish/Done
 # the Studio Videos list until then, so URL capture waits up to this long for the
 # row to appear (R6 publish-stale-URL surveillance finding).
 YOUTUBE_PUBLISH_LISTING_WAIT_S = 420
+# The final Publish/Done button stays aria-disabled until the just-uploaded
+# file finishes processing (Shorts transcoding can take a few minutes); jumping
+# straight to the click exhausts Playwright's click timeout against the disabled
+# button + its overlay backdrop (E2E double observation on the R7 publishes).
+# Wait for it to enable before clicking.
+YOUTUBE_PUBLISH_READY_WAIT_S = 300
 
 
 # ---- Brand-channel routing (R7) ----

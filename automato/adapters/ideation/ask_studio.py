@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -55,6 +56,23 @@ _REFUSAL_PHRASES = (
     "unable to provide",
 )
 
+# Interim chat states (Ask Studio streams these as it works) and the trainer
+# disclaimer that footers every assistant card — none of them is an answer.
+_STREAM_STATUS_PHRASES = (
+    "gathering the comments",
+    "gathering comments",
+    "thinking",
+    "analyzing",
+    "preparing",
+    "searching your channel",
+    "reviewing your analytics",
+)
+_DISCLAIMER_PHRASES = (
+    "ai can make mistakes",
+    "you are responsible for the content you publish",
+    "learn more",
+)
+
 
 def parse_topic(reply: str) -> str:
     """Extract a concrete topic from an Ask Studio answer.
@@ -74,16 +92,85 @@ def parse_topic(reply: str) -> str:
         if idx < 0:
             continue
         rest = text[idx + len(marker):].lstrip(":. \n\t\u2013\u2014")
-        candidates = _candidate_lines(rest)
+        candidates = [
+            c for c in _candidate_lines(rest) if not _is_boilerplate(c)
+        ]
         if candidates:
-            return max(candidates, key=len)
+            titles = [c for c in candidates if _is_title_case(c)]
+            return _clip90(max(titles or candidates, key=len))
         break
-    # Fallback: the first short, non-sentence line anywhere in the reply.
-    for ln in text.splitlines():
-        clean = ln.strip().lstrip("*\u2022\uf0b7- \u2011")
-        if len(clean) >= 4:
-            return clean[:90]
-    return text.strip()[:90]
+    # No marker (Ask Studio varies its formatting): fall back to a short
+    # candidate line, preferring a Title-Case phrase — those are the concrete
+    # topic titles the card lists (observed live: "AI Math Riddle That 95
+    # Percent of Viewers Solve Completely Wrong" beats the nested sentences).
+    candidates = [c for c in _candidate_lines(text) if not _is_boilerplate(c)]
+    if candidates:
+        titles = [c for c in candidates if _is_title_case(c)]
+        return _clip90(max(titles or candidates, key=len))
+    return ""
+
+
+def _clip90(phrase: str) -> str:
+    """Clip to <=90 chars without splitting a word."""
+    phrase = phrase.strip()
+    if len(phrase) <= 90:
+        return phrase
+    cut = phrase.rfind(" ", 0, 90)
+    return phrase[: (cut if cut > 40 else 90)].strip()
+
+
+def _is_title_case(line: str) -> bool:
+    """A candidate topic looks like a title when most of its words start
+    uppercase (headline case rather than a narrative sentence). Numeric tokens
+    (dates, percentages) don't count against it."""
+    tokens = [w for w in re.split(r"\s+", re.sub(r"[^\w]", " ", line)) if w]
+    words = [w for w in tokens if any(ch.isalpha() for ch in w)]
+    if len(words) < 3:
+        return False
+    upper = sum(1 for w in words if w and w[0].isupper())
+    return upper / len(words) >= 0.7
+
+
+def _is_boilerplate(line: str) -> bool:
+    low = line.lower()
+    return any(p in low for p in _STREAM_STATUS_PHRASES) or any(
+        p in low for p in _DISCLAIMER_PHRASES)
+
+
+def _strip_question_echo(text: str, question: str) -> str:
+    """Remove the echoed question from the front of a captured chat region.
+
+    After sending, the chat renders the user's own question as a bubble INSIDE
+    the captured region (the pre-send anchor sits above it). ``inner_text`` can
+    even wrap a bubble mid-word (observed: ``behavior,`` read back as
+    ``havior,``). Lines are dropped from the front while most of their word
+    stems appear in the question.
+    """
+    if not (text and question):
+        return text or ""
+    q_words = [
+        w for w in re.split(r"\s+", re.sub(r"[^\w\s']", " ", question.lower())) if w
+    ]
+    if not q_words:
+        return text
+    lines = text.split("\n")
+    while lines:
+        line = lines[0]
+        words = [w for w in re.split(r"\s+", re.sub(r"[^\w\s']", " ", line.lower())) if w]
+        if not words:
+            lines.pop(0)
+            continue
+        # A line is an echo fragment if most of its word-stems overlap question
+        # stems — including a wrap-split word ("havior," inside "behavior,").
+        overlap = sum(
+            1 for w in words
+            if any(c in w or w in c for c in q_words)
+        ) / len(words)
+        if overlap >= 0.6:
+            lines.pop(0)
+            continue
+        break
+    return "\n".join(lines)
 
 
 def _candidate_lines(text: str) -> list:
@@ -149,7 +236,26 @@ def _locate_composer(page, settings) -> Optional[Any]:
     return None
 
 
-def _capture_reply(page, anchor: str, settings) -> str:
+def _is_final_answer(text: str) -> bool:
+    """A captured region is a REAL answer (not just the question echo, a
+    stream-status card, or the disclaimer footer). A topic marker always
+    counts; otherwise require a minimal body of novel text. Lets the capture
+    keep waiting while Ask Studio is still "gathering comments"."""
+    if not (text or "").strip():
+        return False
+    if any(marker.lower() in text.lower() for marker in _TOPIC_MARKERS):
+        return True
+    t = text
+    for line in t.splitlines():
+        if _is_boilerplate(line):
+            continue
+        stripped = (line.strip() or "").rstrip(".")
+        if len(stripped) >= 40:
+            return True
+    return False
+
+
+def _capture_reply(page, anchor: str, question: str, settings) -> str:
     started = time.time()
     last = ""
     stable = 0
@@ -162,14 +268,19 @@ def _capture_reply(page, anchor: str, settings) -> str:
             continue
         if len(body) <= len(anchor):
             continue
-        region = body[len(anchor):]
+        region = _strip_question_echo(body[len(anchor):], question)
+        # Interim cards ("Gathering the comments...", the disclaimer) are the
+        # same text poll after poll even while the real answer is still being
+        # produced, so require a genuine answer before treating it as settled.
+        if not _is_final_answer(region):
+            last = region
+            continue
         if region != last:
             last = region
             stable = 0
         else:
             stable += 1
-        # Settled once the appended region stopped growing (>=3 stable polls)
-        # and it contains real content. Ask Studio streams for tens of seconds.
+        # Settled once the answer stopped growing (>=3 stable polls).
         if stable >= 3 and len(region) > 110:
             break
     log.info("Ask Studio reply captured in %.0fs (%d chars)",
@@ -201,7 +312,7 @@ def _ask(page, question: str, settings) -> str:
     except Exception as exc:  # noqa: BLE001
         raise ExecutorError(f"Could not submit the Ask Studio question: {exc}",
                             retryable=True) from exc
-    return _capture_reply(page, anchor, settings)
+    return _capture_reply(page, anchor, question, settings)
 
 
 def run(ctx, inputs, run_dir, session=None):
@@ -233,6 +344,9 @@ def run(ctx, inputs, run_dir, session=None):
     _open_drawer(page, ctx.settings)
     raw = _ask(page, question, ctx.settings)
 
+    # ''raw'' has already had the echoed question and stream-status/disclaimer
+    # cards stripped; both refuse detection and topic parsing work on the
+    # assistant's own words.
     if _is_refusal(raw) and not any(m.lower() in raw.lower()
                                     for m in _TOPIC_MARKERS):
         raise ExecutorError(

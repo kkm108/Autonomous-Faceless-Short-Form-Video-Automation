@@ -41,6 +41,24 @@ def test_confirm_non_interactive_aborts(monkeypatch):
         _confirm_publish(s, "T", "main")
 
 
+def test_confirm_interactive_prompts_via_input(monkeypatch):
+    # Regression: the interactive fallback called sys.stdin.readline(prompt),
+    # which raised TypeError "'str' object cannot be interpreted as an integer"
+    # on a real TextIOWrapper (readline treats the str as a buffer size).
+    class Tty:
+        def isatty(self):
+            return True
+
+        def readline(self, size=-1):
+            if isinstance(size, str):
+                raise TypeError("'str' object cannot be interpreted as an integer")
+            return "y\n"
+
+    monkeypatch.setattr("sys.stdin", Tty())
+    s = RunSettings(publish_confirm=True)
+    assert _confirm_publish(s, "T", "main") is True
+
+
 def test_confirm_uses_settings_flag_for_yes_equivalent():
     # --yes pre-confirms by disabling the flag; publish proceeds un-prompted.
     s = RunSettings(publish_confirm=False)

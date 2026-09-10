@@ -320,7 +320,6 @@ def _omnisearch_results(page, query: str) -> List[tuple]:
             const out = [];
             const root = document.querySelector('ytcp-omnisearch-results')
                 || document.querySelector('ytcp-omnisearch') || document;
-            const seen = new Set();
             for (const a of root.querySelectorAll(
                     'a[href*="/video/"], a[href*="/shorts/"], a[href*="/watch"], a[href*="youtu.be"]')) {
                 const row = a.closest('ytcp-video-search-row, ytcp-video-row, li')
@@ -333,9 +332,11 @@ def _omnisearch_results(page, query: str) -> List[tuple]:
     except Exception:  # noqa: BLE001
         ids = []
     pairs = []
+    seen_ids = set()
     for item in ids or []:
         vid = _id_from_href(item.get("href") or "")
-        if vid and vid not in pairs and (item.get("text") or "") not in pairs:
+        if vid and vid not in seen_ids:
+            seen_ids.add(vid)
             pairs.append((item.get("text") or "", vid))
     return pairs
 
@@ -499,22 +500,21 @@ def _confirm_publish(settings, title: str, channel_name: str,
     explicitly passed ``input_fn`` (tests, drivers) skips the tty gate."""
     if not settings.publish_confirm:
         return True
-    interactive = False
-    if input_fn is not None:
-        interactive = True
-    else:
-        input_fn = sys.stdin.readline
+    if input_fn is None:
         try:
             interactive = sys.stdin.isatty()
         except Exception:  # noqa: BLE001
             interactive = False
-    if not interactive:
-        raise ExecutorError(
-            "Publish confirmation is enabled but stdin is not interactive. "
-            "Re-run from a terminal (or pass --yes to pre-confirm). Aborting "
-            "before publishing anything.",
-            retryable=False,
-        )
+        if not interactive:
+            raise ExecutorError(
+                "Publish confirmation is enabled but stdin is not interactive. "
+                "Re-run from a terminal (or pass --yes to pre-confirm). Aborting "
+                "before publishing anything.",
+                retryable=False,
+            )
+        # sys.stdin.readline takes no prompt argument (a str would be read as a
+        # buffer size); builtins.input prints the prompt and reads the line.
+        input_fn = input
     answer = (input_fn(
         f"About to publish '{title}' to channel '{channel_name}'. "
         "Publish now? [y/N] ") or "").strip().lower()
@@ -708,14 +708,58 @@ def run(ctx, inputs, run_dir, session):
     #    falling back to a text-labeled click.
     _checked_visibility(page, visibility, ux)
 
+    # 9b. The visibility dropdown can stay open over the dialog and render the
+    #     <tp-yt-iron-overlay-backdrop> that swallows the Publish click. Dismiss
+    #     any open popup before trying to click (E2E observation).
+    try:
+        page.keyboard.press("Escape")
+    except Exception:  # noqa: BLE001
+        pass
+    time.sleep(config.YOUTUBE_POST_CLICK_SLEEP_S)
+
+    # 9c. Publish/Done stays disabled until the uploaded file finishes processing
+    #     (Shorts transcoding can take a while). Wait for it to enable. NB:
+    #     Playwright's is_enabled() is UNSOUND here — it reports enabled even
+    #     while the button carries disabled/aria-disabled="true" (custom-element
+    #     quirk, observed in E2E), so gate on the attributes directly.
+    done = None
+    ready_deadline = time.time() + config.YOUTUBE_PUBLISH_READY_WAIT_S
+    while time.time() < ready_deadline:
+        cand = locs.try_resolve(page, "done_publish", timeout=800)
+        if cand is not None:
+            try:
+                attrs = cand.evaluate(
+                    "e => ({disabled: e.hasAttribute('disabled'), "
+                    "ariaDisabled: e.getAttribute('aria-disabled')})")
+                if not attrs.get("disabled") and attrs.get("ariaDisabled") != "true":
+                    done = cand
+                    log.info("publish/done enabled after %ss",
+                             int(time.time() - ready_deadline
+                                 + config.YOUTUBE_PUBLISH_READY_WAIT_S))
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+        time.sleep(1)
+    if done is None:
+        try:
+            done = locs.resolve(page, "done_publish")
+        except Exception as exc:  # noqa: BLE001
+            raise ExecutorError(
+                f"Publish/Done button never became clickable after waiting "
+                f"{config.YOUTUBE_PUBLISH_READY_WAIT_S}s; the upload may still "
+                f"be processing. Check Studio before resuming. ({exc})",
+                retryable=True,
+            )
+
     # 10. Publish / Done. Write a durable "upload attempted at T" marker BEFORE
     #     clicking so a resume can detect a possibly-succeeded upload even if
     #     post_url.json is never written (R1-W3). R7: ask for an explicit
     #     confirm-before-publish here (aborts on anything but 'y').
     _confirm_publish(ctx.settings, title, channel_name)
     _mark_upload_attempted(run_dir, title, channel_name)
-    done = locs.resolve(page, "done_publish")
-    ux.click(done, description="publish/done", loc_group="done_publish")
+    # Force-click: the visibility dropdown can leave an overlay backdrop that
+    # swallows actionability-gated clicks (E2E observation).
+    ux.click(done, description="publish/done", loc_group="done_publish", force=True)
 
     # 10b. Pending-checks gate: when publishing first triggers YouTube's
     #     "you may get a strike" warning, a second explicit "Publish anyway"
