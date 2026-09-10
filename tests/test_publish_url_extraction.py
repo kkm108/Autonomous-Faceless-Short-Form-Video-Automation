@@ -7,6 +7,8 @@ stale-latch regression), and the known-id collision guard.
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from automato.adapters.publish.youtube_studio import (
     _extract_id_for_title,
     _id_from_href,
@@ -154,3 +156,64 @@ def test_omnisearch_results_dedups_by_video_id():
          "1PWa6DEwflU"),
         ("0:11 Day 15 of 31 Sep 8, 2026", "lrGZW3FhHGY"),
     ]
+
+
+def test_mark_upload_attempted_writes_durable_marker(tmp_path):
+    import automato.adapters.publish.youtube_studio as pub
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    pub._mark_upload_attempted(run_dir, "3 Accidental Inventions You Use Every Day",
+                               "main", visibility="unlisted")
+    payload = json.loads((run_dir / "upload_attempted.json").read_text(encoding="utf-8"))
+    assert payload["title"].startswith("3 Accidental Inventions")
+    assert payload["channel"] == "main"
+    assert payload["visibility"] == "unlisted"
+    assert payload["attempted_at"] > 0
+    assert pub._upload_attempted(run_dir) is not None
+
+
+def test_upload_attempted_defaults_unlisted_visibility(tmp_path):
+    import automato.adapters.publish.youtube_studio as pub
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    pub._mark_upload_attempted(run_dir, "Some Title", "main")
+    payload = json.loads((run_dir / "upload_attempted.json").read_text(encoding="utf-8"))
+    assert payload["visibility"] == "unlisted"
+
+
+def test_record_publish_writes_post_url(tmp_path):
+    import automato.adapters.publish.youtube_studio as pub
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    result = pub._record_publish(run_dir, "q8RpQtYoxA4", visibility="unlisted")
+    assert result["url"] == "https://www.youtube.com/watch?v=q8RpQtYoxA4"
+    assert result["visibility"] == "unlisted"
+    assert pub._load_previous(run_dir)["url"] == "https://www.youtube.com/watch?v=q8RpQtYoxA4"
+    assert (run_dir / "post_url.json").exists()
+
+
+def test_done_timeout_marker_precedes_failure(tmp_path, monkeypatch):
+    # The publish/Done-timeout path (where the R9 duplicates were born) must
+    # write the attempt marker BEFORE it raises, so no later retry can re-upload.
+    import automato.adapters.publish.youtube_studio as pub
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    called = {}
+    monkeypatch.setattr(pub, "_mark_upload_attempted", lambda rd, t, c, v: called.setdefault("mark", True))
+    monkeypatch.setattr(pub, "_omnisearch_ids_for_title", lambda page, t, timeout_s=15: None)
+    monkeypatch.setattr(pub, "config", type("C", (), {"YOUTUBE_PUBLISH_READY_WAIT_S": 300}))
+    with pytest.raises(pub.ExecutorError) as ei:
+        pub._handle_done_timeout(run_dir, "main", "A Title", "unlisted", MagicMock())
+    assert ei.value.retryable is False
+    assert called.get("mark") is True
+
+
+def test_done_timeout_records_when_search_finds_upload(tmp_path, monkeypatch):
+    import automato.adapters.publish.youtube_studio as pub
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(pub, "_omnisearch_ids_for_title", lambda page, t, timeout_s=15: "q8RpQtYoxA4")
+    result = pub._handle_done_timeout(run_dir, "main", "A Title", "unlisted", MagicMock())
+    assert result["url"] == "https://www.youtube.com/watch?v=q8RpQtYoxA4"
+    assert pub._load_previous(run_dir) is not None
+    assert pub._upload_attempted(run_dir) is not None

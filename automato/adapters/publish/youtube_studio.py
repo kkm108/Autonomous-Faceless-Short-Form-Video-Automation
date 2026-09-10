@@ -387,15 +387,31 @@ def _upload_attempted(run_dir: Path) -> Optional[float]:
         return None
 
 
-def _mark_upload_attempted(run_dir: Path, title: str, channel_name: str) -> None:
-    """Persist an upload-attempt marker before the Publish click."""
+def _mark_upload_attempted(run_dir: Path, title: str, channel_name: str,
+                           visibility: str = "unlisted") -> None:
+    """Persist an upload-attempt marker once the file is in the upload dialog.
+
+    Written as soon as the file is selected so that ANY later crash, retry or
+    resume is forced through the "already attempted" Studio check instead of a
+    blind re-upload (R9 duplicate-shorts incident)."""
     path = run_dir / "upload_attempted.json"
     path.write_text(json.dumps({
         "attempted_at": time.time(),
         "title": title,
-        "visibility": "unlisted",
+        "visibility": visibility,
         "channel": channel_name,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _record_publish(run_dir: Path, vid: str, visibility: str) -> dict:
+    """Persist ``post_url.json`` for a confirmed uploaded video id."""
+    url = f"https://www.youtube.com/watch?v={vid}"
+    result = {"status": "uploaded", "visibility": visibility, "url": url}
+    out_path = run_dir / "post_url.json"
+    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    log.info("Publish result: %s", result)
+    return {"post_url": str(out_path), "url": url, "visibility": visibility}
 
 
 def _checked_visibility(page, visibility: str, ux) -> None:
@@ -607,6 +623,32 @@ def _upload_thumbnail_if_requested(page, inputs: dict, run_dir: Path) -> bool:
         return False
 
 
+def _handle_done_timeout(run_dir: Path, channel_name: str, title: str,
+                         visibility: str, page) -> dict:
+    """Non-retryable handler for a publish/Done button that never enabled.
+
+    The Publish/Done button never became clickable within the window, but
+    YouTube ALSO auto-publishes once processing finishes on its side, so a
+    retryable error here re-uploads the file and fabricates a duplicate Short
+    (R9 incident, observed live). Write the attempt marker FIRST (so no later
+    retry can re-upload), give the upload one short bounded Studio-search
+    check, and if it still hasn't surfaced, stop and ask the operator to verify
+    in Studio before resuming."""
+    _mark_upload_attempted(run_dir, title, channel_name, visibility)
+    check = _omnisearch_ids_for_title(page, title, timeout_s=15)
+    if check:
+        return _record_publish(run_dir, check, visibility)
+    raise ExecutorError(
+        f"Publish/Done button never became clickable after waiting "
+        f"{config.YOUTUBE_PUBLISH_READY_WAIT_S}s and the uploaded video was "
+        f"not yet findable in Studio search ('{title}'). The upload may "
+        f"STILL auto-publish when transcoding finishes — check Studio, mark "
+        f"the video appropriately, then resume (resume will detect it and "
+        f"will NOT upload a duplicate). Not retrying automatically.",
+        retryable=False,
+    )
+
+
 def run(ctx, inputs, run_dir, session):
     video_path = Path(inputs["video"])
     script = json.loads(Path(inputs["script"]).read_text(encoding="utf-8"))
@@ -707,6 +749,14 @@ def run(ctx, inputs, run_dir, session):
     file_input = locs.resolve_hidden(page, "file_input")
     ux.upload(file_input, str(video_path), description="select video file", loc_group="file_input")
 
+    # 3b. Mark the attempt immediately, BEFORE anything else can go wrong: a
+    #     crash, retry or resume after this point must not blindly re-upload the
+    #     same file. Any later attempt enters the "already attempted" guard and
+    #     checks Studio for the video instead (R9 duplicate-shorts incident:
+    #     slow transcoding auto-published each stale retry into N identical
+    #     Shorts because the marker was only written just before the Done click).
+    _mark_upload_attempted(run_dir, title, channel_name, visibility)
+
     # 4. Wait for the upload dialog to finish processing and reach the DETAILS
     #    form (the dialog element itself is hidden; watch its workflow-step attr).
     dialog = locs.resolve_hidden(page, "upload_dialog")
@@ -803,22 +853,13 @@ def run(ctx, inputs, run_dir, session):
                 pass
         time.sleep(1)
     if done is None:
-        try:
-            done = locs.resolve(page, "done_publish")
-        except Exception as exc:  # noqa: BLE001
-            raise ExecutorError(
-                f"Publish/Done button never became clickable after waiting "
-                f"{config.YOUTUBE_PUBLISH_READY_WAIT_S}s; the upload may still "
-                f"be processing. Check Studio before resuming. ({exc})",
-                retryable=True,
-            )
+        return _handle_done_timeout(run_dir, channel_name, title, visibility, page)
 
-    # 10. Publish / Done. Write a durable "upload attempted at T" marker BEFORE
-    #     clicking so a resume can detect a possibly-succeeded upload even if
-    #     post_url.json is never written (R1-W3). R7: ask for an explicit
-    #     confirm-before-publish here (aborts on anything but 'y').
+    # 10. Publish / Done. The upload-attempt marker was already written at step
+    #     3b (R9: it must exist before ANY point from which a retry could
+    #     re-upload). R7: ask for an explicit confirm-before-publish here
+    #     (aborts on anything but 'y').
     _confirm_publish(ctx.settings, title, channel_name)
-    _mark_upload_attempted(run_dir, title, channel_name)
     # Force-click: the visibility dropdown can leave an overlay backdrop that
     # swallows actionability-gated clicks (E2E observation).
     ux.click(done, description="publish/done", loc_group="done_publish", force=True)
