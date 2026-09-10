@@ -78,3 +78,35 @@ channels, and (c) detection risk (below).
    single live R8 run first?
 3. Backfill orphaned unlisted shorts from the 09-07/09-08 test runs?
 4. Clean up stale `output\1788953848_f4805d`?
+
+## Orphaned unlisted shorts — queued for review (2026-09-10 sweep)
+
+These are unlisted test uploads left behind by the 09-07→09-09 validation runs.
+They were never intended to be public, and YouTube URLs extracted at the time
+were unreliable (a pre-R7 extraction bug — some `watch?v=` values repeat or are
+blank). The titles + run dirs below are the reliable record. Decide per short:
+**delete**, **list**, or leave **unlisted**. A bulk-delete pass via Studio is
+possible later (browser-driven, same caution as publishing).
+
+| Date (run) | Title | Run dir |
+|---|---|---|
+| 09-07 11:37 | Why Ancient Rome Built Straight Roads | `output\1788781078_8adcba` |
+| 09-08 12:43 | 3 Life-Changing Benefits of Morning Sunlight | `output\1788871430_b630d3` |
+| 09-08 12:54 | 5 Proven Daily Habits of Successful People | `output\1788872042_c86a2a` |
+| 09-09 05:44 | Why Birds Sing at Dawn | `output\1788932674_193c85` |
+| 09-09 06:24 | The Shocking Story Behind Your Pencil | `output\1788935086_b6ba2a` |
+| 09-09 06:43 | How Compasses Actually Work | `output\1788936204_292ff2` |
+| 09-09 07:02 | The Hidden Reason Why Your Brain Makes You Yawn | `output\1788937336_a73fd8` |
+| 09-09 07:20 | How Bees Actually Make Liquid Gold | `output\1788938450_6f2ca7` |
+| 09-09 07:38 | The Hidden Truth Behind Autumn Leaves | `output\1788939488_4084e7` |
+| 09-09 09:29 | 5 High Protein Meal Prep Ideas For Your Week | `output\1788946195_127364` |
+| 09-09 11:38 | Find The Hidden Number Before Time Runs Out | `output\1788953936_c2ee7b` |
+
+(R7's own publish `output\1789018170_530090` → `https://www.youtube.com/watch?v=chehvTEANzM` is intentional, not orphaned.)
+
+## Housekeeping log
+- 2026-09-10: removed stale `output\1788953848_f4805d`.
+- 2026-09-10: R7 + R8 committed as `c707971`.
+
+## Resolved decisions
+- 2026-09-10: R8 posture = validate one live R8 run first.
