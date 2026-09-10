@@ -152,7 +152,10 @@ async def _edge_stream_save(text: str, out: str, voice: str,
 
     audio = bytearray()
     words: list = []
-    comm = edge_tts.Communicate(text, voice)
+    # edge-tts >= 7 defaults to SentenceBoundary, which would leave our
+    # WordBoundary capture empty; request word-level metadata explicitly so the
+    # assembly stage can sync captions word-for-word (R8-B2).
+    comm = edge_tts.Communicate(text, voice, boundary="WordBoundary")
     async for chunk in comm.stream():
         kind = chunk.get("type")
         if kind == "audio":
@@ -166,6 +169,10 @@ async def _edge_stream_save(text: str, out: str, voice: str,
                 "end_s": round((offset + duration) / 10_000_000, 4),
             })
     Path(out).write_bytes(bytes(audio))
+    if not words:
+        log.warning(
+            "edge-tts streamed audio but reported no WordBoundary events "
+            "for '%s'; captions will fall back to estimation", voice)
     Path(words_out).write_text(json.dumps({
         "provider": "edge_tts",
         "voice": voice,
