@@ -91,6 +91,34 @@ def test_resolve_profile_lookups_from_registry():
     assert channels.resolve_language("es-finance", "finance news") == "es"
 
 
+def test_risk_tier_resolution():
+    # R10-P1: registry field wins, then the known-name map, then the safe default.
+    assert channels.risk_tier_for("es-finance") == "high"      # explicit in yaml
+    assert channels.risk_tier_for("main") == "low"             # explicit in yaml
+    assert channels.risk_tier_for("en-health") == "high"       # name map
+    assert channels.risk_tier_for("en-science-facts") == "low"  # name map
+    assert channels.risk_tier_for("ghost") == "low"             # safe default
+
+
+def test_risk_tier_seeds_cover_rollout_list():
+    # Every channel named in the R10 rollout lists resolves to a known tier.
+    high = ["en-finance-v2", "hi-finance", "es-finance", "en-investing",
+            "en-crypto", "en-health", "hi-health", "en-nutrition", "en-fitness",
+            "hi-fitness", "en-sleep", "en-cybersecurity", "en-real-estate",
+            "en-psychology", "hi-psychology", "ai-hi-business", "en-business-v2",
+            "en-economics", "en-career", "en-leadership", "en-productivity"]
+    low = ["en-history-v2", "hi-history", "en-mysteries", "en-science-facts",
+           "en-automotive", "en-gaming-v2", "en-travel", "en-fashion", "en-space",
+           "en-mathematics-v2", "en-physics", "en-biology", "en-language",
+           "en-motivation", "hi-motivation", "en-spirituality", "hi-spirituality",
+           "en-stoicism", "en-philosophy", "en-parenting", "en-environment",
+           "ai-en-marketing", "en-ai-skills", "hi-science"]
+    for name in high:
+        assert channels.risk_tier_for(name) == "high", name
+    for name in low:
+        assert channels.risk_tier_for(name) == "low", name
+
+
 def test_explicit_channel_wins_over_keywords():
     assert channels.resolve_channel_name(
         "finance money", explicit="main") == "main"

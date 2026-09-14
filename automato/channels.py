@@ -156,6 +156,47 @@ def tone_for(name: str) -> str:
     return (branding_for(name).get("tone") or "").strip()
 
 
+# R10-P1: consequence-of-being-wrong tiering across the 45-channel rollout list.
+# A registry entry's explicit ``risk_tier`` (channels.yaml) wins; this name-keyed
+# map seeds the tier for channels not yet registered so downstream behavior
+# (fact-check, disclaimer, rollout pace, review cadence) is consistent the moment
+# a channel appears. This is a judgment call per R10, not a mechanical fact —
+# revisit it as the channels' actual content becomes clearer.
+_RISK_TIER_BY_NAME = {
+    # high — advice / factual claims where being wrong causes real harm
+    "en-finance-v2": "high", "hi-finance": "high", "es-finance": "high",
+    "en-investing": "high", "en-crypto": "high",
+    "en-health": "high", "hi-health": "high", "en-nutrition": "high",
+    "en-fitness": "high", "hi-fitness": "high", "en-sleep": "high",
+    "en-cybersecurity": "high", "en-real-estate": "high",
+    "en-psychology": "high", "hi-psychology": "high", "ai-hi-business": "high",
+    "en-business-v2": "high", "en-economics": "high",
+    "en-career": "high", "en-leadership": "high", "en-productivity": "high",
+    # low — trivia / entertainment / subjective where a mistake is embarrassing
+    "en-history-v2": "low", "hi-history": "low", "en-mysteries": "low",
+    "en-science-facts": "low", "en-automotive": "low", "en-gaming-v2": "low",
+    "en-travel": "low", "en-fashion": "low", "en-space": "low",
+    "en-mathematics-v2": "low", "en-physics": "low", "en-biology": "low",
+    "en-language": "low", "en-motivation": "low", "hi-motivation": "low",
+    "en-spirituality": "low", "hi-spirituality": "low", "en-stoicism": "low",
+    "en-philosophy": "low", "en-parenting": "low", "en-environment": "low",
+    "ai-en-marketing": "low", "en-ai-skills": "low", "hi-science": "low",
+}
+
+
+def risk_tier_for(name: str) -> str:
+    """R10-P1: the consequence-of-being-wrong tier for a channel.
+
+    Precedence: the registry entry's explicit ``risk_tier`` (channels.yaml) ->
+    the known-name map -> ``low`` (the safe default: entertainment content isn't
+    slowed down by checks built for a different kind of risk).
+    """
+    tier = (profile_for(name).get("risk_tier") or "").strip().lower()
+    if tier in ("high", "low"):
+        return tier
+    return _RISK_TIER_BY_NAME.get(name, "low")
+
+
 def resolve_language(name: Optional[str], topic: str = "") -> str:
     """A2's single language fact: registry language when a channel is known,
     otherwise the coarse text-detection fallback (Sanskrit verse etc.)."""

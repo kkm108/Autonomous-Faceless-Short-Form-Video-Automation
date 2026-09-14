@@ -201,6 +201,20 @@ def run(ctx, inputs, run_dir, session):
     if not prompts:
         raise RuntimeError("Script has no image prompts for Perchance assets")
 
+    # R10-P4: the channel registry's `visual_style` art direction is appended to
+    # every image prompt, so two channels never render identical-looking visuals
+    # (the direct answer to the "looks mass-produced" risk). Branding is skipped
+    # when absent/unknown, keeping asset generation a strict no-op upgrade.
+    from ...channels import branding_for
+    name = getattr(getattr(ctx, "settings", None), "channel_name", None)
+    visual = (branding_for(name).get("visual_style") or "").strip() if name else ""
+    if visual:
+        prompts = [
+            f"{p}, {visual}" if p and visual not in p else p
+            for p in prompts
+        ]
+        log.info("Applied channel visual_style to %d image prompt(s)", len(prompts))
+
     page = session.first_page()
     from ...resilience.interaction import ElementInteractor
 

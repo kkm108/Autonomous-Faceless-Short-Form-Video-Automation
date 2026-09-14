@@ -76,6 +76,22 @@ def test_metadata_round_trip(tmp_path):
     assert isinstance(meta["tags"], list) and "shorts" in meta["tags"]
 
 
+def test_high_tier_metadata_gains_honest_disclaimer(tmp_path):
+    # R10-P2: advice-bearing (high-tier) channel descriptions must carry the
+    # informational disclaimer; low-tier must not be penalised with it.
+    from automato import metadata
+    plan = caption_timing.plan_captions(["Intro", "Body", "End"], "intro body end",
+                                        {}, default_total=20.0)
+    high = metadata.build_metadata("My Short", plan, topic="investing",
+                                   channel="es-finance", risk_tier="high")
+    low = metadata.build_metadata("My Short", plan, topic="history",
+                                  channel="main", risk_tier="low")
+    assert metadata.HIGH_TIER_DISCLAIMER in high["description"]
+    assert metadata.HIGH_TIER_DISCLAIMER not in low["description"]
+    p = metadata.write_metadata(high, tmp_path / "metadata.json")
+    assert metadata.HIGH_TIER_DISCLAIMER in metadata.read_metadata(p)["description"]
+
+
 def test_fallback_generate_image_normalizes_to_jpeg(tmp_path, monkeypatch):
     import io
 

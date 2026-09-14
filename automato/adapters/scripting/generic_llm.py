@@ -18,7 +18,7 @@ import time
 from typing import Optional
 
 from ... import config
-from ...channels import resolve_language, tone_for
+from ...channels import resolve_language, risk_tier_for, tone_for
 from ...llm import chat as browser_chat
 from ...llm import no_login
 from ...llm.script_prompts import build_system_prompt
@@ -164,6 +164,77 @@ def _ask_no_login(page, provider: str, prompt_text: str) -> Optional[dict]:
     return _parse_script(reply, "")
 
 
+# ---------------------------------------------------------------------------
+# R10-P2: second-pass fact/claim review (high-tier channels only) --------------
+# ---------------------------------------------------------------------------
+_REVIEW_PROMPT = (
+    "You are reviewing the factual safety of a short-form video script before it "
+    "is published on a channel that gives financial/health/security/other "
+    "high-stakes advice. Read the script below and find anything that sounds "
+    "authoritative but is actually uncertain, a specific number or statistic that "
+    "should be double-checked, or advice stated more definitively than it should "
+    "be. Be specific and honest; do not invent problems.\n\n"
+    "Reply with exactly one of:\n"
+    "- a line reading: REVIEW OK\n"
+    "- one or more lines starting with FLAG| followed by the exact claim and why "
+    "it needs a human check.\n\n"
+    "SCRIPT:\n{script}"
+)
+
+
+def _build_review_prompt(script: dict, topic: str) -> str:
+    parts = [f"Topic: {topic or '(none provided)'}"]
+    if script.get("title"):
+        parts.append(f"Title: {script['title']}")
+    if script.get("spoken_script"):
+        parts.append(f"Narration: {script['spoken_script']}")
+    caps = script.get("captions") or []
+    if caps:
+        parts.append("Captions: " + " | ".join(str(c) for c in caps))
+    return _REVIEW_PROMPT.format(script="\n".join(parts))
+
+
+def _parse_review(text: str) -> dict:
+    """Same delimited pragma as the script parse: FLAG| lines = issues."""
+    reviewed = bool((text or "").strip())
+    flags = [
+        line.split("|", 1)[1].strip()
+        for line in (text or "").splitlines()
+        if line.strip()[:5].upper() == "FLAG|"
+        and len(line.split("|", 1)) > 1 and line.split("|", 1)[1].strip()
+    ]
+    return {
+        "status": "reviewed" if reviewed else "unreviewed",
+        "flagged": reviewed and bool(flags),
+        "flags": flags,
+        "notes": (text or "").strip()[:1200],
+    }
+
+
+def _ask_review_raw(page, prompt: str) -> str:
+    """One factual-review ask through the no-login chat chain; '' when nothing
+    answered (so the run fails open rather than treating a dead chat as a pass)."""
+    for provider in config.LLM_NO_LOGIN_CHAIN:
+        try:
+            if provider == "duckai":
+                reply = browser_chat.ask(page, prompt)
+            elif provider == "ask_brave":
+                reply = no_login.ask_brave(page, prompt)
+            elif provider == "gemini":
+                reply = no_login.ask_gemini(page, prompt)
+            elif provider == "chatgpt":
+                reply = no_login.ask_chatgpt(page, prompt)
+            else:
+                continue
+            if reply and reply.strip():
+                log.info("Fact-check review obtained via provider '%s'", provider)
+                return reply
+            log.warning("Fact-check provider '%s' returned no reply", provider)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Fact-check provider '%s' failed (%s)", provider, exc)
+    return ""
+
+
 def run(ctx, inputs, run_dir, session):
     topic = str(inputs.get("topic", "")).strip()
     if not topic:
@@ -213,4 +284,34 @@ def run(ctx, inputs, run_dir, session):
     out.write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info("Script generated: %r (%d captions, %d image prompts)",
              script["title"], len(script["captions"]), len(script["image_prompts"]))
-    return {"script": str(out)}
+
+    result = {"script": str(out)}
+
+    # R10-P2: second-pass fact/claim review for HIGH-tier channels. Runs after
+    # generation and before assets (this stage returns before the assets stage
+    # reads script.json). Anything flagged soft-fails the run later (quality gate
+    # gate_factcheck -> downgrade to unlisted), never hard-blocks. Low-tier
+    # channels skip it entirely: the cost of a wrong "accidental invention" fact
+    # is embarrassment, not harm, and entertainment content isn't slowed down.
+    tier = risk_tier_for(channel) if channel else "low"
+    if config.FACTCHECK_ENABLED and tier == "high":
+        log.info("High-tier channel %r: running second-pass fact-check review",
+                 channel)
+        raw = _ask_review_raw(page, _build_review_prompt(script, topic))
+        if not raw:
+            log.warning("Fact-check review yielded no model reply; run fails open "
+                        "(no claim evidence gathered)")
+        review = _parse_review(raw)
+        review.update({"channel": channel, "risk_tier": tier})
+        review_path = run_dir / "factcheck.json"
+        review_path.write_text(
+            json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
+        if review["flagged"]:
+            log.warning("Fact-check flagged %d claim(s): %s",
+                        len(review["flags"]), review["flags"][:3])
+        result["review"] = str(review_path)
+    else:
+        log.info("Fact-check skipped (tier=%s, enabled=%s)", tier,
+                 config.FACTCHECK_ENABLED)
+
+    return result

@@ -13,6 +13,7 @@ that safety instinct into an enforced floor.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -74,6 +75,18 @@ def gate_script(outputs: Dict[str, Any]) -> Optional[QualityGate]:
     return None
 
 
+def _image_file_hashes(files) -> list:
+    """SHA-256 of each readable file's bytes (skipping unreadable/missing paths,
+    which the earlier count checks already hold accountable)."""
+    out = []
+    for p in files:
+        try:
+            out.append(hashlib.sha256(Path(p).read_bytes()).hexdigest())
+        except OSError:
+            continue
+    return out
+
+
 def gate_assets(outputs: Dict[str, Any],
                 requested: Optional[int] = None) -> Optional[QualityGate]:
     """At least ``MIN_IMAGE_FRACTION`` of requested assets must be captured.
@@ -84,6 +97,14 @@ def gate_assets(outputs: Dict[str, Any],
     keyless fallback provider) is an immediate soft-fail: fallback images may
     carry watermarks or be prompt-independent, so such a run must not go live
     unreviewed.
+
+    R10-P0: the captured slide images must be content-*distinct*. The gate used to
+    check only the image *count*, so six reuses of one image passed silently —
+    which is exactly the image/mismatch defect the last review found. Any pair of
+    byte-identical images in one video's asset set is now a soft-fail: a human
+    reviews before it can go public. (Perchance already de-duplicates within a
+    batch, so a duplicate here means the generator reused/collapsed across prompts
+    or the fallback served the same image twice.)
     """
     degraded = outputs.get("degraded_reason")
     if degraded:
@@ -100,6 +121,14 @@ def gate_assets(outputs: Dict[str, Any],
             False,
             f"captured {total}/{requested} image(s) ({100*total//max(1, requested)}%), "
             f"below {100*MIN_IMAGE_FRACTION:.0f}% threshold",
+        )
+    hashes = _image_file_hashes(files)
+    if len(hashes) > 1 and len(set(hashes)) < len(hashes):
+        dups = len(hashes) - len(set(hashes))
+        return QualityGate(
+            False,
+            f"{dups}/{total} captured images are byte-identical (a slide would "
+            "reuse another slide's art); the asset set must be distinct",
         )
     return None
 
@@ -174,6 +203,31 @@ def _duration_of(path: str) -> float:
         return 0.0
 
 
+def gate_factcheck(outputs: Dict[str, Any]) -> Optional[QualityGate]:
+    """R10-P2: a high-tier script that the review pass flagged must not go live
+    public — soft-fail (downgrade to unlisted) so a human reviews it first.
+
+    Deliberately never a hard-block: the underlying model review is imperfect,
+    and the file-based review makes a script that was genuinely dangerous fail
+    closed, not fail open. A stage without a review artifact (low-tier channel,
+    fact-check disabled, review pass failed to answer) passes silently — the
+    absence of an LLM review is not evidence of a problem, and entertainment
+    content is not slowed down by a check built for a different risk.
+    """
+    path = Path(outputs.get("review", ""))
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if data.get("status") != "reviewed" or not data.get("flagged"):
+        return None
+    flags = [str(f)[:120] for f in (data.get("flags") or [])]
+    detail = "; ".join(flags[:3]) or "the review pass asked for verification"
+    return QualityGate(False, f"script fact-check flagged: {detail}")
+
+
 def run_gates(stage_id: str, outputs: Dict[str, Any],
               requested_images: Optional[int] = None,
               expected_video_s: Optional[float] = None) -> list:
@@ -183,6 +237,9 @@ def run_gates(stage_id: str, outputs: Dict[str, Any],
     gates: list = []
     if stage_id == "script":
         r = gate_script(outputs)
+        if r:
+            gates.append(r)
+        r = gate_factcheck(outputs)
         if r:
             gates.append(r)
     elif stage_id == "assets":

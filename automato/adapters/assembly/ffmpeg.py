@@ -19,6 +19,7 @@ a browser. It:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -167,30 +168,49 @@ def _overlay_logo(im: "Image.Image", logo: "Path | None"):
         log.warning("Logo overlay skipped (%s)", exc)
 
 
-def _draw_text_wrapped(draw, text, box_w, box_h, font, fill):
-    """Center-and-wrap `text` into the given box, splitting on spaces.
+# R10-P0 caption-clipping fix: an unbreakable token wider than the caption box
+# used to be emitted as its own line, drawn centered at a negative x, and clipped
+# at the frame edge (reproduced: a 3727px line in a 960px box). Unbreakable
+# tokens are now hard-broken across lines and the wrapped block is scaled down
+# until it fits, so a published caption can never leave the safe area. The box
+# floor keeps even pathological tokens legible.
+_MIN_FONT_SIZE = 28
+_FIT_SCALES = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.42, 0.35)
 
-    Over-long captions keep the *start* (so a published caption never begins
-    mid-sentence) and drop overflowing trailing lines, signalling truncation with
-    a trailing ellipsis.
-    """
-    words = text.split()
-    if not words:
-        return
-    lines, cur = [], ""
-    for w in words:
-        trial = (cur + " " + w).strip()
-        if draw.textlength(trial, font=font) <= box_w:
-            cur = trial
+
+def _fit_blank(font, box_w, box_h) -> dict:
+    return {"lines": 0, "max_line_px": 0.0, "box_w": box_w, "block_px": 0.0,
+            "box_h": box_h, "font_size": font.size, "fit": True}
+
+
+def _wrap_lines(draw, text: str, box_w, font) -> List[str]:
+    """Word-wrap `text` to `box_w`, hard-breaking unbreakable tokens (a slug, a
+    hyphenated run, a URL) across lines so no single line can exceed the box."""
+    lines: List[str] = []
+    for w in text.split():
+        if draw.textlength(w, font=font) > box_w:
+            piece = ""
+            for ch in w:
+                if piece and draw.textlength(piece + ch, font=font) > box_w:
+                    lines.append(piece)
+                    piece = ch
+                else:
+                    piece += ch
+            if piece:
+                lines.append(piece)
+        elif lines and draw.textlength(lines[-1] + " " + w, font=font) <= box_w:
+            lines[-1] += " " + w
         else:
-            lines.append(cur)
-            cur = w
-    lines.append(cur)
-    # drop overflowing lines (keep FIRST lines; truncate the tail).
-    truncated = len(lines) > CAPTION_STYLE["lines"]
-    while len(lines) > CAPTION_STYLE["lines"]:
+            lines.append(w)
+    return lines
+
+
+def _truncate_lines(draw, lines: List[str], box_w, font, max_lines: int) -> List[str]:
+    """Cap the block to ``max_lines`` keeping the *start* (a published caption
+    never begins mid-sentence) and signalling the dropped tail with an ellipsis."""
+    truncated = len(lines) > max_lines
+    while len(lines) > max_lines:
         lines.pop()
-    # trim the final kept line so it fits with an ellipsis appended.
     ell = "\u2026"
     if truncated and lines:
         while lines and draw.textlength(lines[-1] + ell, font=font) > box_w:
@@ -199,19 +219,75 @@ def _draw_text_wrapped(draw, text, box_w, box_h, font, fill):
                 lines.pop()
                 break
     if truncated and lines and not lines[-1].endswith(ell):
-        lines[-1] = lines[-1] + ell
-    if not lines:
-        return
+        lines[-1] += ell
+    return lines
+
+
+def _shrink_font(font, scale):
+    """A copy of ``font`` at ``scale`` (same face); the original when the face
+    cannot be re-sized (PIL bitmap default)."""
+    path = getattr(font, "path", None)
+    if not path:
+        return font
+    try:
+        return ImageFont.truetype(str(path), max(1, int(font.size * scale)))
+    except Exception:  # noqa: BLE001
+        return font
+
+
+def _fit_metrics(draw, font, lines: List[str], box_w, box_h) -> dict:
+    """Rendered-fit facts for the R10 assembly self-check: does the wrapped block
+    actually sit inside the box's safe area before compositing?"""
+    widths = [draw.textlength(ln, font=font) for ln in lines] or [0.0]
     line_h = font.size * 1.15
+    block_px = line_h * len(lines)
+    return {
+        "lines": len(lines),
+        "max_line_px": max(widths),
+        "box_w": box_w,
+        "block_px": block_px,
+        "box_h": box_h,
+        "font_size": font.size,
+        "fit": max(widths) <= box_w and block_px <= box_h,
+    }
+
+
+def _draw_text_wrapped(draw, text, box_w, box_h, font, fill) -> dict:
+    """Center-and-wrap `text` into the given box, splitting on spaces.
+
+    Over-long captions keep the *start* (so a published caption never begins
+    mid-sentence) and drop overflowing trailing lines, signalling truncation with
+    a trailing ellipsis.
+
+    R10-P0: text is guaranteed inside the safe area — unbreakable tokens wider
+    than the box are hard-broken across lines, and the wrapped block is re-wrapped
+    on a scaling ladder until it fits the box. Returns the rendered-fit metrics so
+    the assembly self-check can record them (R10-P3).
+    """
+    if not text.split():
+        return _fit_blank(font, box_w, box_h)
+    applied = font
+    lines: List[str] = []
+    for scale in _FIT_SCALES:
+        applied = _shrink_font(font, scale)
+        lines = _truncate_lines(draw, _wrap_lines(draw, text, box_w, applied),
+                                box_w, applied, CAPTION_STYLE["lines"])
+        if lines and (_fit_metrics(draw, applied, lines, box_w, box_h)["fit"]
+                      or applied.size <= _MIN_FONT_SIZE):
+            break
+    if not lines:
+        return _fit_blank(font, box_w, box_h)
+    line_h = applied.size * 1.15
     total_h = line_h * len(lines)
     y = (box_h - total_h) / 2
     for ln in lines:
-        w_ln = draw.textlength(ln, font=font)
+        w_ln = draw.textlength(ln, font=applied)
         x = (box_w - w_ln) / 2
         # soft shadow for readability
-        draw.text((x + 4, y + 4), ln, font=font, fill=(0, 0, 0, 180))
-        draw.text((x, y), ln, font=font, fill=fill)
+        draw.text((x + 4, y + 4), ln, font=applied, fill=(0, 0, 0, 180))
+        draw.text((x, y), ln, font=applied, fill=fill)
         y += line_h
+    return _fit_metrics(draw, applied, lines, box_w, box_h)
 
 
 def _render_slide(bg_path: Path, caption: str, out_path: Path,
@@ -229,7 +305,9 @@ def _render_slide(bg_path: Path, caption: str, out_path: Path,
     font = _load_font(FONT_SIZE, font_path)
     box_w = W - 120
     box_h = 700
-    _draw_text_wrapped(draw, caption, box_w, box_h, font, (255, 255, 255))
+    fit = _draw_text_wrapped(draw, caption, box_w, box_h, font, (255, 255, 255))
+    if not fit["fit"]:
+        log.warning("Caption did not fit safe area on %s: %s", out_path.name, fit)
     if accent is not None:
         # thin accent bar under the caption block (R8-A3 brand accent)
         bar_y = int(H / 2 + box_h / 2 + 44)
@@ -238,6 +316,25 @@ def _render_slide(bg_path: Path, caption: str, out_path: Path,
     _overlay_logo(composite, logo_path)
     composite.convert("RGB").save(out_path)
     log.debug("Rendered slide -> %s", out_path.name)
+    return fit
+
+
+def _images_distinct(images: List[Path]) -> bool:
+    """R10-P0/P3: every slide image in one video must be content-distinct.
+    A reused/fallback duplicate is exactly the image/mismatch defect the last
+    review found; this is the mechanical per-video check that would have caught
+    it (the assets quality gate enforces it as a soft-fail before assembly)."""
+    seen: set = set()
+    distinct = True
+    for p in images:
+        try:
+            h = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        if h in seen:
+            distinct = False
+        seen.add(h)
+    return distinct
 
 
 def _render_thumbnail(bg_path: Path, title: str, out_path: Path,
@@ -255,13 +352,16 @@ def _render_thumbnail(bg_path: Path, title: str, out_path: Path,
     font = _load_font(84, font_path)
     box_w = W - 140
     box_h = 560
-    _draw_text_wrapped(draw, title, box_w, box_h, font, (255, 255, 255))
+    fit = _draw_text_wrapped(draw, title, box_w, box_h, font, (255, 255, 255))
+    if not fit["fit"]:
+        log.warning("Thumbnail title did not fit safe area: %s", fit)
     if accent is not None:
         bar_y = int(H * 0.42 + box_h + 56)
         draw.rectangle([(W - 260) // 2, bar_y, (W - 260) // 2 + 260, bar_y + 12],
                        fill=accent)
     im.convert("RGB").save(out_path, quality=90)
     log.info("Thumbnail written -> %s", out_path.name)
+    return fit
 
 
 def _probe_duration(path: Path) -> float:
@@ -307,11 +407,13 @@ def run(ctx, inputs, run_dir, session=None):
     slides_dir = run_dir / "slides"
     slides_dir.mkdir(parents=True, exist_ok=True)
     slide_paths = []
+    fit_records = []
     for seg in plan:
         bg = images[seg["index"] % len(images)]
         out = slides_dir / f"slide_{seg['index']:03d}.jpg"
-        _render_slide(bg, seg["text"], out, accent, font_path, logo_path)
+        fit = _render_slide(bg, seg["text"], out, accent, font_path, logo_path)
         slide_paths.append(out)
+        fit_records.append({"slide": seg["index"], "text": seg["text"][:60], **fit})
 
     # 2) Render each slide as its own Ken Burns clip; per-segment timing means
     #    the zoom animation restarts with each caption, not one continuous pan.
@@ -379,13 +481,30 @@ def run(ctx, inputs, run_dir, session=None):
 
     thumbnail_path = run_dir / "thumbnail.jpg"
     bg_for_thumb = images[0]
-    _render_thumbnail(bg_for_thumb, script.get("title") or captions[0] if captions
-                      else "Short", thumbnail_path, accent, font_path)
+    thumb_title = script.get("title") or captions[0] if captions else "Short"
+    thumb_fit = _render_thumbnail(bg_for_thumb, thumb_title, thumbnail_path,
+                                  accent, font_path)
 
     from ...metadata import build_metadata, write_metadata
+    tier = channels.risk_tier_for(channel) if channel else ""
     meta = build_metadata(script.get("title", ""), plan,
-                          topic=script.get("topic", ""), channel=channel)
+                          topic=script.get("topic", ""), channel=channel,
+                          risk_tier=tier)
     metadata_path = write_metadata(meta, run_dir / "metadata.json")
+
+    # R10-P3 assembly self-check: record every caption/thumbnail render-fit (and
+    # the per-video image-distinctness fact) so the gate evidence survives next to
+    # the video. The render code already guarantees fit; this is the audit trail.
+    fit_path = run_dir / "caption_fit.json"
+    fit_records.append({"slide": "thumbnail", "text": thumb_title[:60], **thumb_fit})
+    fit_path.write_text(json.dumps({
+        "records": fit_records,
+        "all_fit": all(r.get("fit") for r in fit_records),
+        "image_hashes_distinct": _images_distinct(images),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not all(r.get("fit") for r in fit_records):
+        log.warning("Captions.json sidecar records an out-of-box render: %s",
+                    [r for r in fit_records if not r.get("fit")])
 
     log.info("Assembled final video: %s (%.1fs, %d segments)",
              final.name, duration, len(seg_paths))
@@ -396,6 +515,7 @@ def run(ctx, inputs, run_dir, session=None):
         "subtitle_srt": str(srt_out),
         "thumbnail": str(thumbnail_path),
         "metadata": str(metadata_path),
+        "caption_fit": str(fit_path),
     }
 
 

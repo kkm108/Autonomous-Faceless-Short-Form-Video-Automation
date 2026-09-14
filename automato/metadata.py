@@ -13,6 +13,15 @@ import re
 from pathlib import Path
 from typing import List
 
+# R10-P2: honest informational disclaimer appended to ``high``-risk-tier channel
+# descriptions — not legal cover, but the simple truth that AI-generated
+# financial/health/security content is informational and not professional advice,
+# and viewers deserve to know that. ``low``-tier (entertainment/trivia) get none.
+HIGH_TIER_DISCLAIMER = (
+    "This video is for general informational and educational purposes only, and "
+    "is not professional (financial, health, legal, or security) advice."
+)
+
 
 def _as_slug_word(word: str) -> str:
     clean = re.sub(r"[^a-zA-Z0-9]", "", word).lower()
@@ -45,13 +54,16 @@ def _chapters(captions_plan: List[dict]) -> List[dict]:
 def build_metadata(title: str,
                    captions_plan: List[dict],
                    topic: str = "",
-                   channel: str = "") -> dict:
+                   channel: str = "",
+                   risk_tier: str = "") -> dict:
     """The full publish-metadata record persisted to metadata.json.
 
     Returned fields: title, description, tags, chapters, channel, topic. The
     description keeps the video honest: title line, a plain description of the
     topic, then chapters as standard YT timestamps when at least one marker
-    passes the 5-second rule.
+    passes the 5-second rule. R10-P2: when ``risk_tier == "high"`` an honest
+    informational disclaimer is appended so viewers of advice-bearing channels
+    are never misled into taking AI-generated content as professional advice.
     """
     captions = [seg.get("text", "") for seg in captions_plan]
     description = [title, "", f"{topic.strip()} - a short, faceless explainer."]
@@ -66,6 +78,9 @@ def build_metadata(title: str,
     if channel:
         description.append("")
         description.append(f"Watch more on {channel}.")
+    if risk_tier == "high":
+        description.append("")
+        description.append(HIGH_TIER_DISCLAIMER)
     return {
         "title": title,
         "description": "\n".join(description),

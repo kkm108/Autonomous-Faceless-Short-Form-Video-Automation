@@ -59,6 +59,62 @@ def test_assets_gate_passes_at_or_above_threshold():
     assert quality.gate_assets({"image_files": ["a"]}) is None  # no requested -> pass
 
 
+def test_assets_gate_soft_fails_on_byte_identical_images(tmp_path: Path):
+    # R10-P0: the image-reuse defect (one file silently serving several slides)
+    # must force a human review (soft-fail) instead of passing on count alone.
+    files = []
+    for i in range(6):
+        p = tmp_path / f"bg_{i:02d}.jpg"
+        p.write_bytes(b"the same bytes")  # identical content
+        files.append(str(p))
+    r = quality.gate_assets({"image_files": files}, requested=6)
+    assert r is not None
+    assert not r.hard and "identical" in r.message
+
+
+def test_assets_gate_passes_on_distinct_images(tmp_path: Path):
+    files = []
+    for i in range(6):
+        p = tmp_path / f"bg_{i:02d}.jpg"
+        p.write_bytes(f"distinct-{i}".encode())
+        files.append(str(p))
+    assert quality.gate_assets({"image_files": files}, requested=6) is None
+
+
+def test_assets_gate_ignores_unreadable_paths_for_hashes():
+    # Files that can't be read still count; they just can't be hash-compared.
+    r = quality.gate_assets({"image_files": ["%d" % i for i in range(5)]},
+                            requested=6)
+    assert r is None
+
+
+def test_gate_factcheck_soft_fails_when_flagged(tmp_path: Path):
+    p = tmp_path / "factcheck.json"
+    p.write_text(json.dumps({
+        "status": "reviewed", "flagged": True,
+        "flags": ["the '92%' figure is unsourced"],
+    }), encoding="utf-8")
+    r = quality.gate_factcheck({"review": str(p)})
+    assert r is not None
+    assert not r.hard and "fact-check flagged" in r.message
+
+
+def test_gate_factcheck_passes_when_clean(tmp_path: Path):
+    p = tmp_path / "factcheck.json"
+    p.write_text(json.dumps({
+        "status": "reviewed", "flagged": False, "flags": [],
+    }), encoding="utf-8")
+    assert quality.gate_factcheck({"review": str(p)}) is None
+
+
+def test_gate_factcheck_passes_when_missing_or_unreviewed(tmp_path: Path):
+    assert quality.gate_factcheck({}) is None
+    p = tmp_path / "factcheck.json"
+    p.write_text(json.dumps({"status": "unreviewed", "flagged": False, "flags": []}),
+                 encoding="utf-8")
+    assert quality.gate_factcheck({"review": str(p)}) is None
+
+
 def test_run_gates_empty_when_all_pass(tmp_path: Path):
     p = tmp_path / "script.json"
     p.write_text(json.dumps(_script()), encoding="utf-8")

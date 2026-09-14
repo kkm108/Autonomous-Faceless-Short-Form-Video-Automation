@@ -61,6 +61,12 @@ def _load_channel_registry() -> dict:
                 f"Channel '{name}' in {CHANNELS_FILE} has an invalid channel_id "
                 f"{cid!r}; a channel id is exactly 24 alphanumerics/_-."
             )
+        tier = (profile or {}).get("risk_tier")
+        if tier and str(tier).strip().lower() not in ("high", "low"):
+            raise ValueError(
+                f"Channel '{name}' in {CHANNELS_FILE} has an invalid risk_tier "
+                f"{tier!r}; expected 'high' or 'low' (R10-P1)."
+            )
     return {
         "default_channel": data.get("default_channel") or "main",
         "channels": channels,
@@ -171,12 +177,20 @@ ALLOW_EXTERNAL_ADAPTERS = (
 DEFAULT_WORKFLOW = "faceless_short"
 DEFAULT_VISIBILITY = "unlisted"      # unlisted, private, public
 
-# Scripting LLM provider. "gemini" (web guest, no login) is the default because
+# LLM provider. "gemini" (web guest, no login) is the default because
 # Google gated Gemini 3 Flash Preview in the free AI Studio Playground behind a
 # Google AI Plan / API key. Pin AUTOMATO_LLM_PROVIDER=ai_studio to use a
 # logged-in AI Studio with a paid plan; otherwise the adapter tries the
 # preferred provider first, then falls back through the no-login chain.
 LLM_PROVIDER = "gemini"
+
+# R10-P2: a second LLM pass that reviews a ``high``-risk-tier channel's generated
+# script for confident-sounding-but-uncertain claims, numbers and over-definite
+# advice. Anything flagged soft-fails the run (downgrades to unlisted) so a human
+# reviews before it goes public. Disable with AUTOMATO_FACTCHECK_ENABLED=0|false.
+_FACTCHECK_ENV = os.environ.get("AUTOMATO_FACTCHECK_ENABLED", "").strip().lower()
+FACTCHECK_ENABLED = True if not _FACTCHECK_ENV else _FACTCHECK_ENV not in (
+    "0", "false", "no", "off")
 
 # No-login LLM fallback chain (R6): tried in order after the user's preferred
 # provider. All are login-free web chat UIs: duck.ai, Ask Brave, Gemini (guest,

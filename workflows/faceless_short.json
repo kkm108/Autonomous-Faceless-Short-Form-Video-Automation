@@ -51,7 +51,8 @@
         "subtitle_vtt": "captions.vtt",
         "subtitle_srt": "captions.srt",
         "thumbnail": "thumbnail.jpg",
-        "metadata": "metadata.json"
+        "metadata": "metadata.json",
+        "caption_fit": "caption_fit.json"
       }
     },
     {

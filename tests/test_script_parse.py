@@ -53,3 +53,24 @@ def test_parse_script_ignores_garbage_lines():
 def test_parse_script_end_substring_does_not_terminate(pre, narration):
     out = generic_llm._parse_script(pre + f"NARRATION | {narration}\n", "T")
     assert out["spoken_script"] == narration
+
+
+def test_parse_review_flags_and_clean():
+    # R10-P2: the review pass uses the same FLAG| delimited pragma as the script.
+    dirty = generic_llm._parse_review(
+        "FLAG| the '92%' figure is unsourced\nFLAG| advice is over-definite\n")
+    assert dirty["status"] == "reviewed" and dirty["flagged"] is True
+    assert dirty["flags"] == ["the '92%' figure is unsourced",
+                              "advice is over-definite"]
+    clean = generic_llm._parse_review("REVIEW OK")
+    assert clean["status"] == "reviewed" and clean["flagged"] is False
+    assert clean["flags"] == []
+    none = generic_llm._parse_review("")
+    assert none["status"] == "unreviewed" and none["flagged"] is False
+
+
+def test_build_review_prompt_embeds_script():
+    script = {"title": "T", "spoken_script": "a claim",
+              "captions": ["c1", "c2"]}
+    prompt = generic_llm._build_review_prompt(script, "finance")
+    assert "finance" in prompt and "a claim" in prompt and "c1" in prompt
