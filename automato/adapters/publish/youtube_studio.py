@@ -281,7 +281,7 @@ def _id_from_video_list(page, title: str, timeout_s: int = 420) -> Optional[str]
     return None
 
 
-def _omnisearch_results(page, query: str) -> List[tuple]:
+def _omnisearch_results(page, query: str, timeout_s: int = 6) -> List[tuple]:
     """Run Studio's own cross-channel search (header omnisearch) and return
     ``(row_text, video_id)`` pairs.
 
@@ -289,8 +289,16 @@ def _omnisearch_results(page, query: str) -> List[tuple]:
     DOM (or that sit beyond the first virtualized page) are invisible to
     ``inner_text`` even though they are uploaded. Studio's "Search across your
     channel" panel renders the same rows in a way we can read, so it is the
-    authoritative fallback for confirming an upload and recovering its id."""
-    ids = []
+    authoritative fallback for confirming an upload and recovering its id.
+
+    Live findings (R9 resume incident): the panel only filters when the query is
+    TYPED keystroke-by-keystroke (a programmatic ``fill`` returns the unfiltered
+    recent list), pressing Enter NAVIGATES into the top result instead of
+    returning the list, and the filtered rows carry ``udvid=<id>`` hrefs (not
+    ``/video/<id>/edit``). We therefore: type the query, read the filtered
+    ``#results a[id^='video-result']`` rows for the ``udvid``, never press Enter,
+    and press Escape afterwards so no overlay blocks the next click."""
+    ids: List[dict] = []
     try:
         for getter in (lambda: page.get_by_role("button", name="Search"),
                        lambda: page.locator("[aria-label='Search']")):
@@ -312,29 +320,56 @@ def _omnisearch_results(page, query: str) -> List[tuple]:
             pass
         time.sleep(0.5)
     try:
-        q.first.fill(query, timeout=5000, force=True)
-        time.sleep(2)
-        page.keyboard.press("Enter")
-        time.sleep(5)
-        ids = page.evaluate("""() => {
-            const out = [];
-            const root = document.querySelector('ytcp-omnisearch-results')
-                || document.querySelector('ytcp-omnisearch') || document;
-            for (const a of root.querySelectorAll(
-                    'a[href*="/video/"], a[href*="/shorts/"], a[href*="/watch"], a[href*="youtu.be"]')) {
-                const row = a.closest('ytcp-video-search-row, ytcp-video-row, li')
-                    || a.parentElement;
-                out.push({ text: (row.textContent || '').replace(/\\s+/g, ' ').slice(0, 300),
-                           href: a.href || '' });
-            }
-            return out;
-        }""")
+        q.first.click(timeout=4000, force=True)
+        time.sleep(0.3)
+        page.keyboard.type((query or "")[:60], delay=30)
+        # The panel first renders the UNFILTERED recent list, then swaps in the
+        # query-filtered rows a beat later (debounce). Waiting on raw presence
+        # latches onto the stale suggestions (R9 live finding), so require the
+        # rows to actually contain the query before accepting them.
+        needle = (query or "").strip().lower()[:20]
+        scan_until = time.time() + timeout_s
+        while time.time() < scan_until:
+            try:
+                ids = page.evaluate("""() => {
+                    const out = [];
+                    for (const a of document.querySelectorAll(
+                            '#results a[id^="video-result"]')) {
+                        const href = a.getAttribute('href') || '';
+                        const m = href.match(/[?&]udvid=([^&]+)/);
+                        out.push({
+                            text: (a.textContent || '').replace(/\\s+/g, ' ').trim()
+                                    .slice(0, 300),
+                            href: href,
+                            vid: m ? m[1] : '',
+                        });
+                    }
+                    return out;
+                }""")
+            except Exception:  # noqa: BLE001
+                ids = []
+            if not needle:
+                pass
+            elif ids and not any(needle in (t.get("text") or "").lower()
+                                 for t in ids):
+                ids = []  # still showing stale/unfiltered rows; keep waiting
+            if ids:
+                break
+            time.sleep(0.5)
     except Exception:  # noqa: BLE001
         ids = []
+    finally:
+        # Dismiss the search overlay (avoid the open-backdrop swallowing the
+        # next click; never press Enter, which navigates into the top result).
+        try:
+            page.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
     pairs = []
     seen_ids = set()
     for item in ids or []:
-        vid = _id_from_href(item.get("href") or "")
+        vid = (item.get("vid") or ""
+               or _id_from_href(item.get("href") or ""))
         if vid and vid not in seen_ids:
             seen_ids.add(vid)
             pairs.append((item.get("text") or "", vid))

@@ -158,6 +158,34 @@ def test_omnisearch_results_dedups_by_video_id():
     ]
 
 
+def test_omnisearch_results_reads_udvid_hrefs():
+    # R9 live finding: filtered omnisearch rows use `?d=ud&udvid=<id>` hrefs,
+    # not /video/<id>/edit. The previous selector never matched them, which made
+    # the duplicate guard blind to already-published copies.
+    rows = [
+        {"text": "0:22 3 Accidental Inventions You Use Every Day",
+         "href": "/channel/UCSH1A5BGmsdNq1oqS1HHLpg/videos/upload?d=ud&udvid=-UGtjCXddYc",
+         "vid": "-UGtjCXddYc"},
+        {"text": "0:22 3 Accidental Inventions You Use Every Day",
+         "href": "/channel/UCSH1A5BGmsdNq1oqS1HHLpg/videos/upload?d=ud&udvid=yrU6089Hwac",
+         "vid": "yrU6089Hwac"},
+    ]
+    page = _stub_omnisearch_page(rows)
+    pairs = _omnisearch_results(page, "3 Accidental Inventions")
+    assert [(t, vid) for t, vid in pairs] == [
+        ("0:22 3 Accidental Inventions You Use Every Day", "-UGtjCXddYc"),
+        ("0:22 3 Accidental Inventions You Use Every Day", "yrU6089Hwac"),
+    ]
+
+
+def test_omnisearch_results_dismisses_panel_with_escape():
+    # Pressing Escape (not Enter -- Enter navigates into the top result) must
+    # leave the overlay dismissed so the next click is never blocked.
+    page = _stub_omnisearch_page([])
+    _omnisearch_results(page, "Anything")
+    assert page.keyboard.press.call_count > 0
+
+
 def test_mark_upload_attempted_writes_durable_marker(tmp_path):
     import automato.adapters.publish.youtube_studio as pub
     run_dir = tmp_path / "run"
