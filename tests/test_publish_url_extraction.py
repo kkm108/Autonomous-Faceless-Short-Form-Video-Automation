@@ -217,3 +217,26 @@ def test_done_timeout_records_when_search_finds_upload(tmp_path, monkeypatch):
     assert result["url"] == "https://www.youtube.com/watch?v=q8RpQtYoxA4"
     assert pub._load_previous(run_dir) is not None
     assert pub._upload_attempted(run_dir) is not None
+
+
+def test_dedupe_existing_title_records_skip(tmp_path, monkeypatch):
+    # Resume-of-an-already-published-title: the R9 start-of-run guard must NOT
+    # open another upload dialog; it records the existing copy and skips.
+    import automato.adapters.publish.youtube_studio as pub
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(pub, "_omnisearch_ids_for_title", lambda page, t, timeout_s=20: "q8RpQtYoxA4")
+    dup = pub._dedupe_existing_title(MagicMock(), run_dir, "A Title", "unlisted")
+    assert dup is not None
+    assert dup["url"] == "https://www.youtube.com/watch?v=q8RpQtYoxA4"
+    assert pub._load_previous(run_dir)["url"] == "https://www.youtube.com/watch?v=q8RpQtYoxA4"
+
+
+def test_dedupe_existing_title_none_when_absent(tmp_path, monkeypatch):
+    import automato.adapters.publish.youtube_studio as pub
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(pub, "_omnisearch_ids_for_title", lambda page, t, timeout_s=20: None)
+    dup = pub._dedupe_existing_title(MagicMock(), run_dir, "Brand New Title", "unlisted")
+    assert dup is None
+    assert not (run_dir / "post_url.json").exists()

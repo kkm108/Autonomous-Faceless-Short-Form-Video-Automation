@@ -623,6 +623,20 @@ def _upload_thumbnail_if_requested(page, inputs: dict, run_dir: Path) -> bool:
         return False
 
 
+def _dedupe_existing_title(page, run_dir: Path, title: str,
+                           visibility: str) -> Optional[dict]:
+    """Marker-independent R9 dedupe: if a video with ``title`` already exists on
+    the channel, record it as this run's publish result and signal the caller to
+    skip the upload. Returns the record dict when a match is found, else None."""
+    already = _omnisearch_ids_for_title(page, title, timeout_s=20)
+    if already:
+        log.warning("Video with title '%s' already exists on the channel (%s); "
+                    "recording it as this run's publish and skipping the upload "
+                    "(R9 duplicate guard)", title, already)
+        return _record_publish(run_dir, already, visibility)
+    return None
+
+
 def _handle_done_timeout(run_dir: Path, channel_name: str, title: str,
                          visibility: str, page) -> dict:
     """Non-retryable handler for a publish/Done button that never enabled.
@@ -735,6 +749,16 @@ def run(ctx, inputs, run_dir, session):
     # intended target before any upload action. Routes onto the target and
     # re-verifies; any mismatch aborts.
     channel_name = _verify_target_channel(page, ctx)
+
+    # R9 title-dedupe: a video with this run's title may already exist on the
+    # channel -- an earlier attempt auto-published when transcoding finished
+    # (Done never enabled). Search BEFORE opening another upload dialog so any
+    # retry/resume of an already-published title records the existing copy as
+    # this run's result instead of fabricating a duplicate Short. This is the
+    # marker-independent backstop to the step-3b marker guard.
+    dup = _dedupe_existing_title(page, run_dir, title, visibility)
+    if dup is not None:
+        return dup
 
     # 1. Create button
     create = locs.resolve(page, "create")
