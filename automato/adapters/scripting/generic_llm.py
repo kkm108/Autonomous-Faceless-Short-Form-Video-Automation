@@ -212,9 +212,20 @@ def _parse_review(text: str) -> dict:
 
 
 def _ask_review_raw(page, prompt: str) -> str:
-    """One factual-review ask through the no-login chat chain; '' when nothing
-    answered (so the run fails open rather than treating a dead chat as a pass)."""
-    for provider in config.LLM_NO_LOGIN_CHAIN:
+    """One factual-review ask through the no-login chat chain in *review order*;
+    '' when nothing answered.
+
+    An empty reply is deliberately recorded as an ``unreviewed`` review artifact:
+    on a high-tier channel the quality gate (gate_factcheck) treats it as a
+    soft-fail to unlisted — a dead chat is not evidence the script is safe, so
+    the run must not pass silently.
+
+    Review order differs from generation's on purpose: the review is a
+    truth-assessment task, so search-grounded providers (Ask Brave, duck.ai) are
+    tried before parametric-only guest models (Gemini, ChatGPT) that may
+    confidently restate an invented figure. See config.review_provider_chain().
+    """
+    for provider in config.review_provider_chain():
         try:
             if provider == "duckai":
                 reply = browser_chat.ask(page, prompt)

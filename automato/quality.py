@@ -204,15 +204,18 @@ def _duration_of(path: str) -> float:
 
 
 def gate_factcheck(outputs: Dict[str, Any]) -> Optional[QualityGate]:
-    """R10-P2: a high-tier script that the review pass flagged must not go live
-    public — soft-fail (downgrade to unlisted) so a human reviews it first.
+    """R10-P2: a high-tier script whose review flagged a claim — or whose review
+    pass got no reply at all — must not go live public: soft-fail (downgrade to
+    unlisted) so a human reviews it first.
 
     Deliberately never a hard-block: the underlying model review is imperfect,
-    and the file-based review makes a script that was genuinely dangerous fail
-    closed, not fail open. A stage without a review artifact (low-tier channel,
-    fact-check disabled, review pass failed to answer) passes silently — the
-    absence of an LLM review is not evidence of a problem, and entertainment
-    content is not slowed down by a check built for a different risk.
+    and falling back to unlisted makes a genuinely dangerous script fail closed
+    without aborting the run. An *absent* artifact is untouched (low-tier
+    channels and disabled fact-check never write one, and entertainment content
+    isn't slowed down by a check built for a different risk). But once a review
+    file exists it proves a high-tier pass ran, and an empty reply from every
+    provider is not evidence of safety — it is the dead-chat case, indistinguish-
+    able from a skipped pass, so it downgrades exactly like a flagged claim.
     """
     path = Path(outputs.get("review", ""))
     if not path.is_file():
@@ -221,7 +224,18 @@ def gate_factcheck(outputs: Dict[str, Any]) -> Optional[QualityGate]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return None
-    if data.get("status") != "reviewed" or not data.get("flagged"):
+    # Only high-tier channels ever produce a review artifact; a missing
+    # risk_tier marker therefore defaults to "high" (fail-closed).
+    tier = str(data.get("risk_tier") or "high").strip().lower()
+    if tier != "high":
+        return None
+    if str(data.get("status") or "").strip() == "unreviewed":
+        return QualityGate(
+            False,
+            "high-tier fact-check review produced no reply; the script ran "
+            "unverified and needs a human before it can go public",
+        )
+    if not data.get("flagged"):
         return None
     flags = [str(f)[:120] for f in (data.get("flags") or [])]
     detail = "; ".join(flags[:3]) or "the review pass asked for verification"

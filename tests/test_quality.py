@@ -92,7 +92,7 @@ def test_gate_factcheck_soft_fails_when_flagged(tmp_path: Path):
     p = tmp_path / "factcheck.json"
     p.write_text(json.dumps({
         "status": "reviewed", "flagged": True,
-        "flags": ["the '92%' figure is unsourced"],
+        "flags": ["the '92%' figure is unsourced"], "risk_tier": "high",
     }), encoding="utf-8")
     r = quality.gate_factcheck({"review": str(p)})
     assert r is not None
@@ -102,17 +102,69 @@ def test_gate_factcheck_soft_fails_when_flagged(tmp_path: Path):
 def test_gate_factcheck_passes_when_clean(tmp_path: Path):
     p = tmp_path / "factcheck.json"
     p.write_text(json.dumps({
-        "status": "reviewed", "flagged": False, "flags": [],
+        "status": "reviewed", "flagged": False, "flags": [], "risk_tier": "high",
     }), encoding="utf-8")
     assert quality.gate_factcheck({"review": str(p)}) is None
 
 
-def test_gate_factcheck_passes_when_missing_or_unreviewed(tmp_path: Path):
+def test_gate_factcheck_passes_when_absent_or_low_tier(tmp_path: Path):
+    # No artifact (low-tier channel / fact-check disabled never write one) passes
+    # silently; a low-tier review record is a no-op too.
     assert quality.gate_factcheck({}) is None
     p = tmp_path / "factcheck.json"
-    p.write_text(json.dumps({"status": "unreviewed", "flagged": False, "flags": []}),
-                 encoding="utf-8")
+    p.write_text(json.dumps({
+        "status": "unreviewed", "flagged": False, "flags": [], "risk_tier": "low",
+    }), encoding="utf-8")
     assert quality.gate_factcheck({"review": str(p)}) is None
+
+
+def test_gate_factcheck_soft_fails_on_empty_reply_high_tier(tmp_path: Path):
+    # R10 customer feedback: "the review pass got no reply at all" on a high-tier
+    # channel is not evidence of safety — it must downgrade exactly like a
+    # flagged claim, not pass silently.
+    p = tmp_path / "factcheck.json"
+    p.write_text(json.dumps({
+        "status": "unreviewed", "flagged": False, "flags": [], "risk_tier": "high",
+    }), encoding="utf-8")
+    r = quality.gate_factcheck({"review": str(p)})
+    assert r is not None
+    assert not r.hard and "no reply" in r.message
+
+
+def test_gate_factcheck_fails_closed_when_tier_marker_missing(tmp_path: Path):
+    # Only high-tier channels write a review artifact, so an unreviewed record
+    # without a risk_tier marker is assumed high-tier (fail-closed).
+    p = tmp_path / "factcheck.json"
+    p.write_text(json.dumps({
+        "status": "unreviewed", "flagged": False, "flags": [],
+    }), encoding="utf-8")
+    r = quality.gate_factcheck({"review": str(p)})
+    assert r is not None and not r.hard
+
+
+def test_empty_review_downgrades_visibility_on_high_tier(tmp_path: Path):
+    # The orchestration contract (R2-W4): any soft-fail gate on a stage flips
+    # ctx.settings.force_unlisted, and the publish adapter applies that as an
+    # unlisted downgrade even when the run explicitly asked for public.
+    p = tmp_path / "factcheck.json"
+    p.write_text(json.dumps({
+        "status": "unreviewed", "flagged": False, "flags": [], "risk_tier": "high",
+    }), encoding="utf-8")
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps(_script()), encoding="utf-8")
+
+    failed = quality.run_gates("script", {"script": str(script), "review": str(p)})
+    soft = [g for g in failed if not g.hard]
+    assert len(soft) == 1 and "no reply" in soft[0].message
+
+    from automato.settings import RunSettings
+    s = RunSettings(visibility="public")
+    for gate in failed:
+        s.force_unlisted = not gate.hard          # orchestrator's action
+    assert s.force_unlisted is True
+    effective = ("unlisted" if s.force_unlisted and s.visibility != "unlisted"
+                 else s.visibility)               # publish adapter's decision
+    assert effective == "unlisted"
 
 
 def test_run_gates_empty_when_all_pass(tmp_path: Path):

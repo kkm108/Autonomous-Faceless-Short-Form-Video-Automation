@@ -36,6 +36,34 @@ def test_provider_sequence_unknown_preferred_falls_back(monkeypatch):
     assert "nope" not in seq
 
 
+def test_review_chain_orders_search_grounded_before_parametric(monkeypatch):
+    # R10 customer feedback: the fact-check review is a *truth* assessment, so it
+    # must prefer search-grounded providers (Ask Brave, duck.ai) over
+    # parametric-only memory (Gemini, ChatGPT) — and the review chain must differ
+    # from generation's, which keeps the configured order.
+    _patch_chain(monkeypatch)
+    gen = generic_llm._provider_sequence("ai_studio")[1:]
+    review = config.review_provider_chain()
+    assert gen == DEFAULT_CHAIN                     # generation unchanged
+    assert review != gen                            # review re-sorts on purpose
+    assert review == ["ask_brave", "duckai", "gemini", "chatgpt"]
+    grounded = {"ask_brave", "duckai"}
+    seen_grounded = [p for p in review if p in grounded]
+    seen_parametric = [p for p in review if p not in grounded]
+    assert seen_parametric
+    assert set(seen_grounded) == grounded
+    assert set(seen_parametric) == {"gemini", "chatgpt"}
+
+
+def test_review_chain_search_first_survives_custom_generation_order(monkeypatch):
+    # Even when a custom chain puts parametric models first for *generation*, the
+    # review pass still lifts the search-grounded pair to the front.
+    monkeypatch.setattr(config, "LLM_NO_LOGIN_CHAIN",
+                        ["gemini", "chatgpt", "duckai", "ask_brave"])
+    assert config.review_provider_chain() == ["ask_brave", "duckai", "gemini",
+                                              "chatgpt"]
+
+
 def test_every_chain_entry_has_a_driver(monkeypatch):
     _patch_chain(monkeypatch)
     from automato.llm import no_login

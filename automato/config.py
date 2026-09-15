@@ -204,6 +204,29 @@ LLM_NO_LOGIN_CHAIN = (
     else ["duckai", "ask_brave", "gemini", "chatgpt"]
 )
 
+# Providers whose answers are grounded in a live search (Ask Brave cites its
+# sources; duck.ai queries the web) vs. parametric-only memory models that may
+# confidently restate an invented figure. The fact-check review pass is a
+# truth-assessment task, so it prefers the search-grounded pair first — unlike
+# script *generation*, which keeps LLM_NO_LOGIN_CHAIN's own order.
+_SEARCH_GROUNDED_PROVIDERS = ("ask_brave", "duckai")
+
+
+def review_provider_chain() -> list:
+    """Ordered no-login chain for the R10-P2 fact-check review pass.
+
+    Deliberately differs from the generation chain: review is checking whether
+    claims are *true*, so Ask Brave (cited-source answers) is tried first, then
+    duck.ai, then the parametric-only guest models (Gemini, ChatGPT). A custom
+    AUTOMATO_LLM_NO_LOGIN_CHAIN still shapes the chain — relative order within
+    each group is preserved — without defeating the search-first bias.
+    """
+    chain = [p for p in LLM_NO_LOGIN_CHAIN if p]
+    grounded = [p for p in chain if p in _SEARCH_GROUNDED_PROVIDERS]
+    rest = [p for p in chain if p not in _SEARCH_GROUNDED_PROVIDERS]
+    grounded.sort(key=_SEARCH_GROUNDED_PROVIDERS.index)  # ask_brave before duckai
+    return [*grounded, *rest]
+
 # TTS strategy. "auto" tries the browser web tool (SoundTools) then edge-tts then
 # pyttsx3 on failure. You can force one: "soundtools" | "edge_tts" | "pyttsx3".
 TTS_PROVIDER = "auto"
