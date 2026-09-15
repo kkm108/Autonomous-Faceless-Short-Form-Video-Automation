@@ -55,7 +55,15 @@ FrameSnap = List[Tuple[str, List[Tuple[str, str]]]]
 
 
 def _generator_frame(page):
-    """Return the nested iframe holding the generator's description box."""
+    """Return the nested iframe holding the generator's description box.
+
+    A missing generator frame mid-run means the site re-rendered its embed
+    hierarchy (Perchance teardown/reloads its iframes between generations). That
+    is a transient condition a fresh browser session reliably fixes, so it raises
+    a retryable :class:`ExecutorError` — the orchestrator re-runs the whole
+    assets stage with backoff (R1-W3/STAGE_RETRY_ATTEMPTS) instead of failing the
+    run on a flake.
+    """
     for f in page.frames:
         if f is page.main_frame:
             continue
@@ -64,7 +72,13 @@ def _generator_frame(page):
                 return f
         except Exception:  # noqa: BLE001
             continue
-    raise RuntimeError("Could not locate the Perchance generator iframe")
+    from ..base import ExecutorError
+
+    raise ExecutorError(
+        "Could not locate the Perchance generator iframe "
+        "(site re-rendered its embed hierarchy); retrying the assets stage",
+        retryable=True,
+    )
 
 
 def _hash_of(b64: str) -> str:
@@ -193,6 +207,17 @@ def _pick_newest_correlated(prev: FrameSnap, cur: FrameSnap) -> Tuple[List[str],
     return hashes, chosen_key
 
 
+def _mark_degraded(run_dir: Path, result: dict, reason: str,
+                   rescued: int, saved: int) -> None:
+    """Persist the degraded-asset marker; the asset quality gate soft-fails any
+    run carrying it, so publish downgrades to unlisted."""
+    (run_dir / "degraded_assets.json").write_text(
+        json.dumps({"reason": reason, "rescued": rescued, "saved": saved},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+    result["degraded_reason"] = reason
+    log.warning("Assets stage degraded: %s", reason)
+
+
 def run(ctx, inputs, run_dir, session):
     script_path = Path(inputs["script"])
     script = json.loads(script_path.read_text(encoding="utf-8"))
@@ -215,6 +240,26 @@ def run(ctx, inputs, run_dir, session):
         ]
         log.info("Applied channel visual_style to %d image prompt(s)", len(prompts))
 
+    assets_dir = run_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    saved: list = []
+
+    if not config.PERCHANCE_ENABLED:
+        # R10 rollout instrumentation: force the whole run through the keyless
+        # fallback provider (pollinations/picsum) to prove that rescue path works
+        # end-to-end. It always marks the run degraded, so publish downgrades to
+        # unlisted. Re-enable the browser generator with AUTOMATO_PERCHANCE_ENABLED=1.
+        log.warning("Perchance generator disabled; using keyless fallback provider")
+        rescued = _top_up_fallback(assets_dir, saved, prompts, image_count)
+        if not saved:
+            raise RuntimeError("Perchance disabled and the keyless fallback "
+                               "produced no images")
+        reason = (f"Perchance disabled (forced keyless fallback: "
+                  f"{len(saved)}/{image_count} images)")
+        result = {"images": str(assets_dir), "image_files": saved}
+        _mark_degraded(run_dir, result, reason, rescued=len(saved), saved=len(saved))
+        return result
+
     page = session.first_page()
     from ...resilience.interaction import ElementInteractor
 
@@ -224,9 +269,6 @@ def run(ctx, inputs, run_dir, session):
     _generator_frame(page)
     _apply_generator_settings(_generator_frame(page))
 
-    assets_dir = run_dir / "assets"
-    assets_dir.mkdir(parents=True, exist_ok=True)
-    saved: list = []
     batch = int(config.PERCHANCE_NUM_IMAGES or 1)
     remaining = image_count
     prompt_iter = cycle(prompts)
@@ -337,11 +379,7 @@ def run(ctx, inputs, run_dir, session):
     if rescued > 0:
         reason = (f"Perchance fell short ({rescued}/{image_count} images from "
                   f"the keyless fallback provider)")
-        (run_dir / "degraded_assets.json").write_text(
-            json.dumps({"reason": reason, "rescued": rescued, "saved": len(saved)},
-                       ensure_ascii=False, indent=2), encoding="utf-8")
-        result["degraded_reason"] = reason
-        log.warning("Assets stage degraded: %s", reason)
+        _mark_degraded(run_dir, result, reason, rescued=rescued, saved=len(saved))
     return result
 
 

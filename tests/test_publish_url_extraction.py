@@ -220,6 +220,49 @@ def test_record_publish_writes_post_url(tmp_path):
     assert (run_dir / "post_url.json").exists()
 
 
+def test_recent_upload_exists_prefers_omnisearch_vid(monkeypatch):
+    # R10 rollout resume regression: a still-processing upload was invisible to
+    # the Studio list scan but found instantly by cross-channel search. The old
+    # helper returned only a bool, threw the search's exact id away, and a second
+    # list-based extraction then failed -> the resume falsely refused to record a
+    # successfully uploaded video. It must return the search's id directly.
+    import automato.adapters.publish.youtube_studio as pub
+    page = MagicMock()
+    monkeypatch.setattr(pub, "_goto_videos_list", lambda page, shorts=True: None)
+    monkeypatch.setattr(pub, "_omnisearch_ids_for_title",
+                        lambda page, t, timeout_s=20: "RKXD76JqW1g")
+    monkeypatch.setattr(pub, "_extract_id_for_title", lambda page, t: None)
+    vid = pub._recent_upload_exists(page, "Why Old Computers Beeped")
+    assert vid == "RKXD76JqW1g"
+
+
+def test_recent_upload_exists_none_when_truly_absent(monkeypatch):
+    import automato.adapters.publish.youtube_studio as pub
+    page = MagicMock()
+    page.locator("body").inner_text.side_effect = Exception("boom")
+    page.locator("text=You haven't uploaded any videos yet").count.return_value = 0
+    monkeypatch.setattr(pub, "_goto_videos_list", lambda page, shorts=True: None)
+    monkeypatch.setattr(pub, "_omnisearch_ids_for_title", lambda page, t, timeout_s=20: None)
+    monkeypatch.setattr(pub, "_extract_id_for_title", lambda page, t: None)
+    assert pub._recent_upload_exists(page, "A Brand New Title", timeout_s=2) is None
+
+
+def test_recent_upload_exists_falls_back_to_list_extraction(monkeypatch):
+    # Search misses (video not yet indexed) but the list scan saw the title:
+    # fall back to list-based extraction rather than refusing outright.
+    import automato.adapters.publish.youtube_studio as pub
+    page = MagicMock()
+    page.locator("body").inner_text.return_value = (
+        "Videos\nWhy Old Computers Beeped On Startup\nSettings")
+    page.locator("text=You haven't uploaded any videos yet").count.return_value = 0
+    monkeypatch.setattr(pub, "_goto_videos_list", lambda page, shorts=True: None)
+    monkeypatch.setattr(pub, "_omnisearch_ids_for_title", lambda page, t, timeout_s=20: None)
+    monkeypatch.setattr(pub, "_extract_id_for_title",
+                        lambda page, t: "q8RpQtYoxA4")
+    vid = pub._recent_upload_exists(page, "Why Old Computers Beeped", timeout_s=2)
+    assert vid == "q8RpQtYoxA4"
+
+
 def test_done_timeout_marker_precedes_failure(tmp_path, monkeypatch):
     # The publish/Done-timeout path (where the R9 duplicates were born) must
     # write the attempt marker BEFORE it raises, so no later retry can re-upload.

@@ -364,7 +364,9 @@ def _run_workflow_locked(workflow_name: str, seed: Dict[str, Any],
             ctx.settings.force_unlisted = True
 
         log.info("Stage '%s' complete in %.1fs", sid, time.time() - t0)
+        state.mark_stage_timing(sid, time.time() - t0)
 
     state.mark_done()
-    log.info("Workflow '%s' finished. Run dir: %s", workflow_name, state.run_dir)
+    log.info("Workflow '%s' finished (total %.1fs). Run dir: %s", workflow_name,
+             state.total_s or 0.0, state.run_dir)
     return state

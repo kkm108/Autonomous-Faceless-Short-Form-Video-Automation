@@ -68,22 +68,29 @@ def plan_captions(captions: List[str], narration: str, timings: dict,
 
 
 def _greedy_match(captions: List[str], timed: List[dict]) -> List[dict]:
-    """Greedy forward match: narration words are consumed in order; each caption
-    takes as many words as its own text shares, moving the caption boundary to a
-    real narrated word. Cost is O(W*C) for the tiny sizes involved."""
-    cap_tokens = [_words(c) for c in captions]
-    pos = 0
+    """Allocate the FULL narrated timeline across captions proportionally.
+
+    Narration is often not a verbatim reading of the captions: short hooks or
+    paraphrases tokenize to far fewer words than were spoken (observed: 26 caption
+    tokens vs 57 narrated words). The old greedy walk consumed one caption's-
+    token-worth of narration words per caption and silently dropped the remainder,
+    producing a video truncated to the covered span. Instead we award each caption
+    a word-slice proportional to its token share of all captions, mapped onto the
+    complete timed word list so every narrated word — and the full audio — is
+    covered by a slide.
+    """
+    cap_tokens = [max(len(_words(c)), 1) for c in captions]
     n_timed = len(timed)
+    total_tokens = sum(cap_tokens) or 1
+    pos = 0
+    run = 0.0
     plan: List[dict] = []
     for cap_index, tokens in enumerate(cap_tokens):
-        needed = max(len(tokens), 1)
-        end_i = pos
-        consumed = 0
-        while consumed < needed and end_i < n_timed:
-            consumed += 1
-            end_i += 1
-        if end_i >= n_timed:
-            end_i = n_timed
+        share_end = (run + tokens) / total_tokens
+        end_i = min(n_timed, round(share_end * n_timed))
+        if end_i <= pos:
+            end_i = min(pos + 1, n_timed)
+        run += tokens
         start_s = timed[pos]["start_s"] if pos < n_timed else 0.0
         end_s = timed[end_i - 1]["end_s"] if end_i - 1 >= 0 else start_s
         plan.append({

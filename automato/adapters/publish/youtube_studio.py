@@ -577,16 +577,17 @@ def _confirm_publish(settings, title: str, channel_name: str,
     return True
 
 
-def _recent_upload_exists(page, title: str, timeout_s: int = 60) -> bool:
-    """Navigate YouTube Studio's Videos list and check for ``title`` among recent
-    uploads. Used on resume to avoid double-publishing when the previous attempt
-    succeeded but never wrote ``post_url.json``.
+def _recent_upload_exists(page, title: str, timeout_s: int = 60) -> Optional[str]:
+    """Return ``title``'s video id among Studio's recent uploads, or None.
 
-    The list's ``inner_text`` can miss rows whose titles render inside shadow DOM
-    or beyond the first virtualized page, so the cross-channel search is the
-    authoritative fallback (observed: a published short invisible to the list but
-    found instantly by omnisearch).
+    Used on resume to avoid double-publishing when the previous attempt succeeded
+    but never wrote ``post_url.json``. The list's ``inner_text`` can miss rows
+    whose titles render inside shadow DOM or beyond the first virtualized page, so
+    the cross-channel search is the authoritative fallback (observed: a published
+    short invisible to the list but found instantly by omnisearch) — and its exact
+    id is what the caller records, rather than trusting a second list-based scan.
     """
+    found_in_list = False
     try:
         _goto_videos_list(page)
         # The video-list rows render as ytcp-video-row elements or title cells.
@@ -596,7 +597,8 @@ def _recent_upload_exists(page, title: str, timeout_s: int = 60) -> bool:
             try:
                 content = page.locator("body").inner_text(timeout=4000)
                 if needle and needle in content:
-                    return True
+                    found_in_list = True
+                    break
                 # "No videos" empty-state: definitely not present.
                 empty = page.locator("text=You haven't uploaded any videos yet")
                 if empty.count() > 0:
@@ -605,9 +607,16 @@ def _recent_upload_exists(page, title: str, timeout_s: int = 60) -> bool:
                 pass
             time.sleep(3)
     except Exception:  # noqa: BLE001
-        return False
-    # Authoritative fallback: Studio's own cross-channel search.
-    return _omnisearch_ids_for_title(page, title, timeout_s=20) is not None
+        pass
+    # Authoritative fallback: Studio's own cross-channel search returns the exact
+    # video id; prefer it over list-based extraction (which can be blind to still-
+    # processing rows).
+    vid = _omnisearch_ids_for_title(page, title, timeout_s=20)
+    if vid:
+        return vid
+    if found_in_list:
+        return _extract_id_for_title(page, title)
+    return None
 
 
 def _upload_thumbnail_if_requested(page, inputs: dict, run_dir: Path) -> bool:
@@ -728,18 +737,21 @@ def run(ctx, inputs, run_dir, session):
             title_hint = (json.loads(
                 (run_dir / "upload_attempted.json").read_text(encoding="utf-8")
             ).get("title") or "")
-            if _recent_upload_exists(page_check, title_hint):
+            # _recent_upload_exists returns the AUTHORITATIVE video id (its
+            # cross-channel search surfaces a still-processing upload that the
+            # list may not render yet); reuse it directly instead of re-extracting
+            # from the list, which previously missed the row and falsely refused.
+            vid = _recent_upload_exists(page_check, title_hint)
+            if vid:
                 # The upload did go through; record it and treat as done.
-                vid = _extract_id_for_title(page_check, title_hint) or ""
-                url = f"https://www.youtube.com/watch?v={vid}" if vid else ""
+                url = f"https://www.youtube.com/watch?v={vid}"
                 out_path = run_dir / "post_url.json"
-                if url:
-                    out_path.write_text(json.dumps(
-                        {"status": "uploaded", "visibility": "unlisted",
-                         "url": url}, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
-                    return {"post_url": str(out_path), "url": url,
-                            "visibility": "unlisted"}
+                out_path.write_text(json.dumps(
+                    {"status": "uploaded", "visibility": "unlisted",
+                     "url": url}, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+                return {"post_url": str(out_path), "url": url,
+                        "visibility": "unlisted"}
         except Exception as exc:  # noqa: BLE001
             raise ExecutorError(
                 f"Previous upload may have succeeded but cannot be confirmed; "

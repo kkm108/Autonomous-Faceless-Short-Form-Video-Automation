@@ -30,6 +30,42 @@ def test_greedy_match_lands_at_real_words():
     assert len(plan) == 2
 
 
+def test_greedy_match_covers_full_narration_when_captions_are_short():
+    """R10 rollout finding: when the spoken narration is a longer paraphrase
+    of short caption hooks (57 narrated words vs 26 caption tokens), the old
+    greedy walk consumed only caption-token-count words per caption, silently
+    dropped the rest, and produced a video truncated to half the audio. The
+    matcher must now allocate the FULL narration timeline proportionally."""
+    # 8 narrated words, 2 captions with 1 token each (= 2 caption tokens total).
+    # The first caption should get words 0-3 (half), the second words 4-7 (half),
+    # covering all 8 words rather than only 2.
+    words = [f"w{i}" for i in range(8)]
+    timings = _sample_timings(words)
+    plan = caption_timing.plan_captions(["Hook", "Fin"],
+                                        " ".join(words), timings)
+    assert len(plan) == 2
+    assert plan[0]["word_range"] == [0, 4]
+    assert plan[1]["word_range"] == [4, 8]
+    # Last word end covers the full narration span.
+    assert plan[-1]["end_s"] == 7.4
+    assert plan[0]["start_s"] == 0.0
+    assert plan[0]["estimated"] is False
+
+
+def test_greedy_match_monotonic_with_asymmetric_token_counts():
+    # Uneven caption lengths: one very long, two short — all words covered.
+    words = [f"word{c}" for c in "abcdefgh"]
+    timings = _sample_timings(words)
+    plan = caption_timing.plan_captions(
+        ["Long caption with many words here", "Short", "Tiny"],
+        " ".join(words), timings)
+    # Each caption gets at least one word; all 8 covered.
+    assert plan[0]["word_range"][0] == 0
+    assert plan[-1]["word_range"][1] == 8
+    assert plan[0]["end_s"] < plan[1]["start_s"]
+    assert plan[1]["end_s"] <= plan[2]["end_s"]
+
+
 def test_no_timings_falls_back_to_proportional_estimate():
     plan = caption_timing.plan_captions(["One", "two three"],
                                         "one two three", {})

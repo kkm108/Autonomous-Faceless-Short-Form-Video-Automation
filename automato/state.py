@@ -14,7 +14,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from . import config
 
@@ -35,6 +35,9 @@ class RunState:
         self.run_dir = run_dir
         self.completed: Dict[str, Dict[str, Any]] = {}
         self.status = "running"
+        self.created_at: Optional[float] = None
+        self.completed_at: Optional[float] = None
+        self.timings: Dict[str, float] = {}
 
     # -- persistence ----------------------------------------------------
     @property
@@ -48,6 +51,10 @@ class RunState:
             "seed": self.seed,
             "run_dir": str(self.run_dir),
             "status": self.status,
+            "created_at": self.created_at,
+            "completed_at": self.completed_at,
+            "total_s": self.total_s,
+            "timings": self.timings,
             "completed": self.completed,
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,9 +67,24 @@ class RunState:
         self.completed[stage_id] = outputs
         self.save()
 
+    def mark_stage_timing(self, stage_id: str, seconds: float) -> None:
+        """Record a stage's wall-clock seconds in run_state.json (measurement
+        instrumentation, not a pipeline capability — used to answer the
+        multi-channel scheduling question with real numbers)."""
+        self.timings[stage_id] = round(seconds, 3)
+        self.save()
+
     def mark_done(self) -> None:
         self.status = "done"
+        self.completed_at = time.time()
         self.save()
+
+    @property
+    def total_s(self) -> Optional[float]:
+        """Whole-run wall-clock across every session (created_at -> done)."""
+        if self.created_at is None or self.completed_at is None:
+            return None
+        return round(self.completed_at - self.created_at, 3)
 
     # -- helpers --------------------------------------------------------
     @staticmethod
@@ -71,6 +93,7 @@ class RunState:
         run_dir = config.OUTPUT_DIR / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         state = RunState(run_id, workflow, seed, run_dir)
+        state.created_at = time.time()
         state.save()
         return state
 
@@ -93,4 +116,7 @@ class RunState:
     def _restore(self, payload) -> "RunState":
         self.status = payload.get("status", "running")
         self.completed = dict(payload.get("completed", {}))
+        self.created_at = payload.get("created_at")
+        self.completed_at = payload.get("completed_at")
+        self.timings = dict(payload.get("timings", {}))
         return self

@@ -204,27 +204,30 @@ LLM_NO_LOGIN_CHAIN = (
     else ["duckai", "ask_brave", "gemini", "chatgpt"]
 )
 
-# Providers whose answers are grounded in a live search (Ask Brave cites its
-# sources; duck.ai queries the web) vs. parametric-only memory models that may
-# confidently restate an invented figure. The fact-check review pass is a
-# truth-assessment task, so it prefers the search-grounded pair first — unlike
-# script *generation*, which keeps LLM_NO_LOGIN_CHAIN's own order.
-_SEARCH_GROUNDED_PROVIDERS = ("ask_brave", "duckai")
+# Providers whose answers are grounded in a live search vs. parametric-only
+# memory models that may confidently restate an invented figure. Only Ask Brave
+# qualifies: DuckDuckGo's duck.ai chat is itself a black-box LLM and is NOT a
+# search-grounded citation source, so it stays out of the search-grounded group.
+# The fact-check review pass is a truth-assessment task, so it prefers the
+# search-grounded providers first — unlike script *generation*, which keeps
+# LLM_NO_LOGIN_CHAIN's own order.
+_SEARCH_GROUNDED_PROVIDERS = ("ask_brave",)
 
 
 def review_provider_chain() -> list:
     """Ordered no-login chain for the R10-P2 fact-check review pass.
 
     Deliberately differs from the generation chain: review is checking whether
-    claims are *true*, so Ask Brave (cited-source answers) is tried first, then
-    duck.ai, then the parametric-only guest models (Gemini, ChatGPT). A custom
-    AUTOMATO_LLM_NO_LOGIN_CHAIN still shapes the chain — relative order within
-    each group is preserved — without defeating the search-first bias.
+    claims are *true*, so Ask Brave (the only search-grounded provider, with
+    cited-source answers) is tried first, then the rest of the chain (duck.ai,
+    Gemini, ChatGPT). A custom AUTOMATO_LLM_NO_LOGIN_CHAIN still shapes the
+    chain — relative order within each group is preserved — without defeating
+    the search-first bias.
     """
     chain = [p for p in LLM_NO_LOGIN_CHAIN if p]
     grounded = [p for p in chain if p in _SEARCH_GROUNDED_PROVIDERS]
     rest = [p for p in chain if p not in _SEARCH_GROUNDED_PROVIDERS]
-    grounded.sort(key=_SEARCH_GROUNDED_PROVIDERS.index)  # ask_brave before duckai
+    grounded.sort(key=_SEARCH_GROUNDED_PROVIDERS.index)  # structural; one member today
     return [*grounded, *rest]
 
 # TTS strategy. "auto" tries the browser web tool (SoundTools) then edge-tts then
@@ -273,6 +276,14 @@ PERCHANCE_POLL_INTERVAL_S = 5
 # numImages to 0 to leave the site defaults alone.
 PERCHANCE_SHAPE = os.environ.get("AUTOMATO_PERCHANCE_SHAPE", "512x768")
 PERCHANCE_NUM_IMAGES = int(os.environ.get("AUTOMATO_PERCHANCE_NUM_IMAGES", "4") or 0)
+# Force the whole assets stage through the keyless fallback provider
+# (pollinations/picsum, see adapters/assets/fallback.py) instead of the browser
+# Perchance generator. Used to exercise that rescue path end-to-end during the
+# R10 rollout; such runs always mark themselves degraded so publish downgrades to
+# unlisted. Disable Perchance with AUTOMATO_PERCHANCE_ENABLED=0|false|no|off.
+_PERCHANCE_ENV = os.environ.get("AUTOMATO_PERCHANCE_ENABLED", "").strip().lower()
+PERCHANCE_ENABLED = True if not _PERCHANCE_ENV else _PERCHANCE_ENV not in (
+    "0", "false", "no", "off")
 # youtube_studio
 YOUTUBE_UI_SETTLE_S = 3               # post-navigation settle
 YOUTUBE_POST_CLICK_SLEEP_S = 2        # micro-settle between workflow steps

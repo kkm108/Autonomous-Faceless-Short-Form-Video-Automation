@@ -1,5 +1,12 @@
 """R2-W5: pure-logic tests for Perchance prompt/image DOM-container correlation."""
 
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from automato import config
+from automato.adapters.assets import perchance_images
 from automato.adapters.assets.perchance_images import (
     _pick_newest_correlated,
     _should_downgrade_scoped,
@@ -82,3 +89,52 @@ def test_per_prompt_target_respects_remaining_budget():
     assert _per_prompt_target(2, 4) == 2
     assert _per_prompt_target(6, 1) == 1
     assert _per_prompt_target(6, 0) == 1  # disabled config degrades to single
+
+
+def _make_ctx():
+    return SimpleNamespace(settings=SimpleNamespace(channel_name=None))
+
+
+def _script(tmp_path, n_prompts=2):
+    p = tmp_path / "script.json"
+    p.write_text(json.dumps({"image_prompts": [f"prompt {i}" for i in range(n_prompts)]}),
+                 encoding="utf-8")
+    return str(p)
+
+
+def test_perchance_disabled_runs_entirely_through_fallback(tmp_path, monkeypatch):
+    # R10 rollout: forcing the whole assets stage through the keyless fallback
+    # provider must never touch the browser session and must always mark the run
+    # degraded (so publish downgrades to unlisted).
+    run_dir = tmp_path / "run"
+
+    def fake_top_up(assets_dir, saved, prompts, remaining):
+        for i in range(remaining):
+            p = assets_dir / f"bg_{len(saved):02d}.jpg"
+            p.write_bytes(b"jpeg-bytes")
+            saved.append(str(p))
+        return remaining
+
+    monkeypatch.setattr(config, "PERCHANCE_ENABLED", False)
+    monkeypatch.setattr(perchance_images, "_top_up_fallback", fake_top_up)
+    out = perchance_images.run(_make_ctx(), {"script": _script(tmp_path),
+                                             "image_count": 4}, run_dir,
+                               session=None)
+    assert len(out["image_files"]) == 4
+    assert out["degraded_reason"].startswith("Perchance disabled")
+    marker = json.loads((run_dir / "degraded_assets.json").read_text(encoding="utf-8"))
+    assert marker["rescued"] == 4 and marker["saved"] == 4
+
+
+def test_perchance_disabled_raises_when_fallback_produces_nothing(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+
+    def empty_top_up(assets_dir, saved, prompts, remaining):
+        return 0
+
+    monkeypatch.setattr(config, "PERCHANCE_ENABLED", False)
+    monkeypatch.setattr(perchance_images, "_top_up_fallback", empty_top_up)
+    with pytest.raises(RuntimeError, match="Perchance disabled"):
+        perchance_images.run(_make_ctx(), {"script": _script(tmp_path),
+                                           "image_count": 4}, run_dir,
+                             session=None)
