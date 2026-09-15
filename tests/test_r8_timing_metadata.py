@@ -159,3 +159,45 @@ def test_fallback_generate_image_normalizes_to_jpeg(tmp_path, monkeypatch):
     assert path.exists() and path.stat().st_size > 0
     im = Image.open(path)
     assert im.size == (fallback.W, fallback.H)
+
+
+def test_fallback_pollinations_url_is_percent_encoded_and_nologo(tmp_path, monkeypatch):
+    """URL contract for the pollinations fallback (R10): the prompt must be
+    %20-encoded (genuine spaces), never '+' or '%2B', and the request must carry
+    width/height/seed plus nologo=true so anonymous-tier images are logo-free.
+    A prompt containing '/', '&' and spaces must not break the URL."""
+    import io
+
+    from PIL import Image
+
+    from automato.adapters.assets import fallback
+
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32), (0, 0, 0)).save(buf, "JPEG")
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return buf.getvalue()
+
+    seen = {}
+
+    def _fake_urlopen(req, timeout=0):
+        seen["url"] = req.full_url
+        return _Resp()
+
+    monkeypatch.setattr(fallback.urllib.request, "urlopen", _fake_urlopen)
+    out = tmp_path / "bg_00.jpg"
+    fallback.generate_image("server / rack & cats", out, width=512, height=768)
+    url = seen["url"]
+    assert url.startswith("https://image.pollinations.ai/prompt/")
+    assert "server%20%2F%20rack%20%26%20cats" in url
+    assert "+" not in url and "%2B" not in url
+    assert "width=512&height=768" in url
+    assert "seed=" in url
+    assert "nologo=true" in url

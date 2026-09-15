@@ -1,9 +1,18 @@
-"""R6: pure-logic tests for language-aware TTS routing."""
+"""R6 + R10: pure-logic tests for language-aware TTS routing and the
+edge-tts voice-catalog resolution."""
+
+import json
 
 from automato import config
 from automato.adapters.tts import routing
+from automato.adapters.tts.kokoro_tts import (
+    _edge_voice_names,
+    _resolve_edge_voice,
+)
 
-LOCAL = ["soundtools", "edge_tts", "pyttsx3"]
+# edge-tts is primary; soundtools stays as a service-independent spare; pyttsx3
+# is the offline last resort (R10: edge-tts now leads the local chain).
+LOCAL = ["edge_tts", "soundtools", "pyttsx3"]
 
 
 def test_detect_devanagari_is_sanskrit():
@@ -45,3 +54,63 @@ def test_routing_table_shape():
     # no unknown languages get silently routed; "sa" is the only special case.
     assert set(routing.PRIMARY_TTS_BY_LANGUAGE) == {"sa"}
     assert routing.PRIMARY_TTS_BY_LANGUAGE["sa"] == "vagdhenu"
+
+
+def test_local_chain_orders_edge_first():
+    assert routing.LOCAL_TTS_CHAIN == ["edge_tts", "soundtools", "pyttsx3"]
+
+
+def test_edge_voice_names_reads_local_cache(tmp_path, monkeypatch):
+    # Prefer the deterministic local cache over edge-tts' live list.
+    cache = tmp_path / "voices.json"
+    cache.write_text(json.dumps([
+        {"ShortName": "en-US-ChristopherNeural", "Locale": "en-US"},
+        {"ShortName": "es-ES-AlvaroNeural", "Locale": "es-ES"},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(config, "EDGE_VOICES_CACHE_FILE", cache)
+    monkeypatch.setattr("edge_tts.list_voices", lambda: [
+        {"ShortName": "en-US-JennyNeural"}])
+    assert _edge_voice_names() == ["en-US-ChristopherNeural", "es-ES-AlvaroNeural"]
+
+
+def test_edge_voice_names_falls_back_to_live_list(tmp_path, monkeypatch):
+    # Unreadable cache -> edge-tts' own list_voices().
+    monkeypatch.setattr(config, "EDGE_VOICES_CACHE_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr("edge_tts.list_voices", lambda: [
+        {"ShortName": "en-US-JennyNeural"},
+        {"ShortName": "hi-IN-MadhurNeural"},
+    ])
+    assert _edge_voice_names() == ["en-US-JennyNeural", "hi-IN-MadhurNeural"]
+
+
+def test_edge_voice_names_empty_when_everything_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "EDGE_VOICES_CACHE_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr("edge_tts.list_voices", RuntimeError("no network"))
+    assert _edge_voice_names() == []
+
+
+def test_resolve_edge_voice_keeps_known_voice(tmp_path, monkeypatch):
+    cache = tmp_path / "voices.json"
+    cache.write_text(json.dumps([
+        {"ShortName": "en-US-ChristopherNeural", "Locale": "en-US"}]), encoding="utf-8")
+    monkeypatch.setattr(config, "EDGE_VOICES_CACHE_FILE", cache)
+    assert _resolve_edge_voice("en", "en-US-ChristopherNeural") == "en-US-ChristopherNeural"
+
+
+def test_resolve_edge_voice_uses_locale_fallback(tmp_path, monkeypatch):
+    # Stale config references a voice no longer listed: pick the first known
+    # voice for the SAME locale, preserving en/es/hi fidelity.
+    cache = tmp_path / "voices.json"
+    cache.write_text(json.dumps([
+        {"ShortName": "es-ES-AlvaroNeural", "Locale": "es-ES"},
+        {"ShortName": "es-MX-DaliaNeural", "Locale": "es-MX"},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(config, "EDGE_VOICES_CACHE_FILE", cache)
+    assert _resolve_edge_voice("es", "es-ES-EliasNeural") == "es-ES-AlvaroNeural"
+
+
+def test_resolve_edge_voice_unavailable_catalog_keeps_expected(tmp_path, monkeypatch):
+    # Catalog unavailable entirely: skip validation, use configured voice.
+    monkeypatch.setattr(config, "EDGE_VOICES_CACHE_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr("edge_tts.list_voices", RuntimeError("no network"))
+    assert _resolve_edge_voice("en", "en-US-ChristopherNeural") == "en-US-ChristopherNeural"

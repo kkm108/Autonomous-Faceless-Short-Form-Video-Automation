@@ -5,10 +5,11 @@ flakiness, CDN issues, UI changes), the assets stage tops up from this module so
 the pipeline survives. No API key, no signup, no account: a plain HTTP GET.
 
 Provider order (vetting pass, both keyless):
-  1. pollinations.ai image API  -- free text-to-image; the anonymous tier's
-     images carry a small watermark, so runs that use it MUST be flagged as
-     degraded (the asset quality gate soft-fails and publish downgrades to
-     unlisted). Best prompt fidelity.
+  1. pollinations.ai image API  -- free text-to-image via its URL-based endpoint
+     ``image.pollinations.ai/prompt/{prompt}?width=&height=&seed=&nologo=true``
+     (prompt %20-encoded so the model reads genuine spaces). Runs that use it MUST
+     be flagged as degraded (the asset quality gate soft-fails and publish
+     downgrades to unlisted). Best prompt fidelity.
   2. picsum.photos               -- infinite curated CC photos, no watermark,
      prompt-independent. Last resort so a dead image API never kills a run.
 
@@ -50,13 +51,16 @@ def generate_image(prompt: str, out_path: Path, width: int = W, height: int = H,
     Raises RuntimeError when every provider fails.
     """
     seed = random.randrange(1 << 30)
-    capped = (prompt or "").strip()[:PROMPT_LIMIT].replace(" ", "+")
+    # URL-encode the prompt (spaces -> %20, per pollinations' documented format;
+    # safe="" also escapes '/' and '&' so a prompt with either cannot break the
+    # URL structure). nologo=true suppresses the anonymous-tier logo/watermark.
+    capped = (prompt or "").strip()[:PROMPT_LIMIT]
     data = None
     source = None
     try:
         url = (f"https://image.pollinations.ai/prompt/"
-               f"{urllib.parse.quote(capped)}"
-               f"?width={width}&height={height}&seed={seed}")
+               f"{urllib.parse.quote(capped, safe='')}"
+               f"?width={width}&height={height}&seed={seed}&nologo=true")
         data = _fetch(url, timeout_s)
         source = "pollinations"
         log.info("Fallback image generated (pollinations): %s", out_path.name)

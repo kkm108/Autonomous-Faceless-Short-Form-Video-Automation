@@ -1,15 +1,15 @@
 """Generate the voiceover for a Short.
 
-Strategy is ordered and resilient by design. We first try the in-browser web TTS
-tool (SoundTools / Kokoro) -- the original no-API, no-account path that fits the
-project's "browser-automate external steps" ethos. The browser is flaky: the
-Kokoro WASM model is fetched from a CDN that can fail to load, and the UI changes.
-So we bound that attempt and, on any failure, fall back to high-quality local
-TTS that needs no browser, ending with an offline engine that is guaranteed to
-produce audio:
+Strategy is ordered and resilient by design. edge-tts (Microsoft Edge neural
+voices) is now primary: it streams the audio AND real per-word WordBoundary
+timings the assembly stage syncs captions to (R8-B2), and it needs no browser.
+It is followed by the original no-API, no-account browser path (SoundTools /
+Kokoro) as a service-independent spare — the browser is flaky (WASM model CDN
+failures, UI churn), so that attempt is bounded and quick-fails — and the chain
+ends with an offline engine that is guaranteed to produce audio:
 
-    1. soundtools  (browser, bounded + quick-fail)  -> WAV
-    2. edge_tts    (Microsoft Edge neural voices)    -> MP3
+    1. edge_tts    (Microsoft Edge neural voices)    -> MP3 + word timings
+    2. soundtools  (browser, bounded + quick-fail)  -> WAV
     3. pyttsx3      (offline, always available)      -> WAV
 
 Set config.TTS_PROVIDER to one of soundtools|edge_tts|pyttsx3 to force a single
@@ -107,6 +107,60 @@ def _browser_soundtools(page, text: str, run_dir: Path, timeout_s: int,
         else:
             time.sleep(8)
     raise RuntimeError("SoundTools did not produce a downloadable audio file in time")
+
+
+def _edge_voice_names() -> list:
+    """ShortNames of every known Edge neural voice, without a live fetch.
+
+    Priors: the local NaturalVoiceSAPIAdapter cache (offline, deterministic),
+    then edge-tts' own live ``list_voices()`` when the file is absent/unreadable.
+    Returns ``[]`` only when both fail, so callers know to skip validation
+    rather than brick synthesis on a missing cache.
+    """
+    cache = getattr(config, "EDGE_VOICES_CACHE_FILE", None)
+    if cache:
+        try:
+            data = json.loads(Path(cache).read_text(encoding="utf-8"))
+            names = sorted(
+                {str(v["ShortName"]).strip() for v in data
+                 if isinstance(v, dict) and v.get("ShortName")})
+            if names:
+                return names
+        except (json.JSONDecodeError, OSError, KeyError, TypeError):
+            pass
+    try:
+        import edge_tts
+        return sorted({v["ShortName"] for v in edge_tts.list_voices()})
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _resolve_edge_voice(language: "str | None", expected: str) -> str:
+    """Return ``expected`` if it is a real Edge voice, else the best known one.
+
+    ``expected`` comes from the language->voice table (routing.edge_voice_for).
+    Voice names drift over time, and a stale configured name fails deep inside
+    Communicate() with a confusing error; so against the known catalog we
+    resolve up-front to the configured voice when present, otherwise to the
+    first known voice for the same locale (keeps en/es/hi fidelity), and only
+    fall back to ``expected`` verbatim when the catalog is unavailable at all.
+    """
+    known = _edge_voice_names()
+    if not known:
+        return expected
+    if expected in known:
+        return expected
+    locale = (language or "").strip().lower()
+    for name in known:
+        if name.lower().startswith(locale + "-"):
+            log.warning(
+                "Edge voice %r missing from catalog; using %r for locale %s",
+                expected, name, locale)
+            return name
+    log.warning(
+        "Edge voice %r missing from catalog and no %r voice is listed; "
+        "using it anyway", expected, locale)
+    return expected
 
 
 def _edge_tts(text: str, run_dir: Path, voice: str) -> Path:
@@ -211,7 +265,7 @@ def run(ctx, inputs, run_dir, session=None):
     language = (resolve_language(ctx.settings.channel_name, text) if ctx else
                 (detect_language(text) or "en"))
     chain = build_tts_chain(text, provider, language=language)
-    voice = edge_voice_for(language)
+    voice = _resolve_edge_voice(language, edge_voice_for(language))
 
     page = None
     if session is not None:

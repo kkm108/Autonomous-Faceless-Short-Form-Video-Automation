@@ -1,8 +1,8 @@
 """Language-aware TTS routing (R6 + R8-A2).
 
 Single source of truth for which primary provider serves which language. The
-existing local offline chain (soundtools -> edge_tts -> pyttsx3) is the universal
-fallback; a language may add an online primary site ahead of it.
+local chain (edge_tts -> soundtools -> pyttsx3) is the universal fallback; a
+language may add an online primary site ahead of it.
 
 R8-A2: the *channel registry*'s ``language`` field is now the single fact that
 drives the scripting language, the publish channel choice AND the TTS route.
@@ -10,19 +10,22 @@ drives the scripting language, the publish channel choice AND the TTS route.
 never silently disagree. The text-detection fallback (Devanagari -> `sa`) still
 applies only when no channel-driven language is available.
 
-Route rules (honest, not universal): the browser tool (SoundTools) and the
-offline pyttsx3 engine are English-oriented, so for known non-English languages
-the chain skips ahead to edge-tts (whose neural voices genuinely cover es/hi) and
-ends with pyttsx3 solely as a last-resort. English keeps the full local chain.
+Provider order (honest, not universal): edge-tts is primary because it serves
+every Neo-Edge neural voice with real per-word boundary timings (R8-B2) the
+assembly stage needs for caption sync, and because the browser tool is flaky
+(SoundTools' WASM model / UI churn) yet remains a service-independent spare for
+when Microsoft's engine is down. pyttsx3 is the offline last resort.
 """
 from __future__ import annotations
 
 import re
 
-# The guaranteed offline chain, tried in order after any language primary fails.
-LOCAL_TTS_CHAIN = ["soundtools", "edge_tts", "pyttsx3"]
+# The guaranteed local chain, tried in order after any language primary fails.
+LOCAL_TTS_CHAIN = ["edge_tts", "soundtools", "pyttsx3"]
 # Languages whose primary route is edge-tts (browser tool + pyttsx3 are
-# English-oriented; edge-tts has genuine neural voices for these).
+# English-oriented; edge-tts has genuine neural voices for these). With edge-tts
+# now first in the chain this only shortens the non-English route to drop
+# soundtools outright.
 EDGE_FIRST_LANGUAGES = ("es", "hi")
 # language code -> primary online site (opt-in, ahead of the local chain).
 PRIMARY_TTS_BY_LANGUAGE = {

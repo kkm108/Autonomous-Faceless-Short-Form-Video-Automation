@@ -230,9 +230,24 @@ def review_provider_chain() -> list:
     grounded.sort(key=_SEARCH_GROUNDED_PROVIDERS.index)  # structural; one member today
     return [*grounded, *rest]
 
-# TTS strategy. "auto" tries the browser web tool (SoundTools) then edge-tts then
-# pyttsx3 on failure. You can force one: "soundtools" | "edge_tts" | "pyttsx3".
+# TTS strategy. "auto" tries edge-tts first (Microsoft Edge neural voices, with
+# real word-boundary timing), then the browser tool (SoundTools) as a service-
+# independent fallback, then pyttsx3 offline on failure. You can force one:
+# "soundtools" | "edge_tts" | "pyttsx3".
 TTS_PROVIDER = "auto"
+
+# Local copy of Microsoft's Edge neural-voice catalog, cached on disk by
+# NaturalVoiceSAPIAdapter. We use it to validate/select edge-tts voices WITHOUT
+# hitting Microsoft's endpoint at runtime, and to survive a stale/blocked live
+# voice list. shape: [{ShortName, Locale, Gender, ...}]. Override with
+# AUTOMATO_EDGE_VOICES_CACHE_FILE. When unset/missing we fall back to
+# edge_tts.list_voices(); when that also fails, voice validation is skipped
+# and the configured voice is used as-is.
+EDGE_VOICES_CACHE_FILE = Path(
+    os.environ.get("AUTOMATO_EDGE_VOICES_CACHE_FILE", "").strip()
+    or (Path(os.environ.get("LOCALAPPDATA", ""))
+        / "NaturalVoiceSAPIAdapter" / "EdgeVoiceListCache.json")
+)
 
 # Language-aware routing (R6): classical-verse/chant Sanskrit (`sa`) may route to
 # the online vagdhenu (IISc) engine, but that adapter is opt-in and not yet
