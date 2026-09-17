@@ -194,7 +194,10 @@ def fetch_performance(root=None, session=None, min_age_days: float = 0.0,
     Returns one record per attempted run: ``fetched`` (ok), ``no_data`` (too
     young / not yet indexed), ``skipped`` (no logged-in session or no video id),
     ``error``. A run whose video is too recent has no analytics, which is the
-    expected outcome — recorded, never fatal.
+    expected outcome — recorded, never fatal. A ``no_data`` record is NOT a
+    lock: Studio may simply have had nothing to render at that moment, so a
+    later invocation re-attempts it rather than silently leaving the run
+    without analytics forever.
     """
     root = Path(root) if root else config.OUTPUT_DIR
     out: list = []
@@ -205,7 +208,11 @@ def fetch_performance(root=None, session=None, min_age_days: float = 0.0,
         vid = video_id(run_dir)
         if not vid:
             continue
-        if performance(run_dir) is not None:
+        perf = performance(run_dir)
+        # Only a run with real analytics is final. A persisted no_data record
+        # (Studio had nothing yet — e.g. a slow render or still-unindexed video)
+        # stays retryable so the real numbers can be captured on a later pass.
+        if perf is not None and perf.get("status") != "no_data":
             continue
         age = published_age_days(run_dir) or 0.0
         if age < min_age_days:

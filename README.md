@@ -66,11 +66,19 @@ If the browser can't be found, add `--browser chromium` and run
 
 | Stage | Adapter | Provider | Needs login? |
 |---|---|---|---|
-| Scripting | `scripting.generic_llm` | Gemini web guest → duck.ai → Ask Brave → ChatGPT (no-login); AI Studio optional | No |
-| Assets | `assets.perchance_images` | Perchance free image generator | No |
-| Voiceover | `tts.kokoro_tts` | SoundTools (browser) → edge-tts → pyttsx3 | No |
+| Scripting | `scripting.generic_llm` | Weighted lead over Gemini web guest / duck.ai / Ask Brave / ChatGPT (no-login); AI Studio (paid login) optional | No |
+| Assets | `assets.perchance_images` | Perchance browser generator ↔ pollinations/picsum keyless fallback (weighted roll) | No |
+| Voiceover | `tts.kokoro_tts` | Weighted lead over edge-tts / SoundTools (browser) / pyttsx3 | No |
 | Assembly | `assembly.ffmpeg` | Local FFmpeg + Pillow (no network) | — |
 | Publish | `publish.youtube_studio` | YouTube Studio web upload | **Yes** |
+
+Each provider-backed stage is an **ordered failure chain** whose *lead* is chosen
+by a weighted roll (`AUTOMATO_<STAGE>_WEIGHTS`) — who leads rotates, the rest
+keep their cascade order as the safety net. The winning pick, the weights, and
+any degradation are recorded per run in `output/<run_id>/provider_choices.json`,
+and a *degraded* stage (used provider ≠ primary, or a mid-chain fallback) never
+publishes at normal visibility — it downgrades to `unlisted` (see
+[Provider selection & measuring](#provider-selection--measuring-what-actually-won)).
 
 ## Constraint fit (why this is built this way)
 
@@ -92,6 +100,10 @@ seed topic
       └─ publish    → youtube_studio    → post_url.json
 ```
 
+Every stage also writes its provider choice + weights to
+`provider_choices.json` (the A/B ledger), which `ab-results --fetch` later joins
+with per-video Studio analytics into `performance.json`.
+
 Resilience lives in `automato/resilience/`:
 
 - **RetryPolicy** — exponential backoff + jitter around every ambient action.
@@ -111,12 +123,16 @@ challenge handling).
 | Command | What it does |
 |---|---|
 | `python -m automato run "<topic>"` | Run the full pipeline. |
+| `python -m automato plan "<topic>"` | Dry-run a run's routing — channel, language, TTS lead, switches. No browser, no credits. |
 | `python -m automato login <provider>` | One-time visible login (`youtube`, `ai_studio`, `perchance`). |
 | `python -m automato health-check` | Re-validate provider locators against live sites (monthly drift check). |
 | `python -m automato trend` | Show LLM-recovery rates per provider (drift early-warning). |
 | `python -m automato replay-import file.json` | Turn a DevTools Recorder export into locator hints. |
 | `python -m automato backup` | AES-encrypted, portable snapshot of profiles/workflows/config/output. |
 | `python -m automato restore archive.zip` | Restore a backup, rebinding paths to the new machine. |
+| `python -m automato channel-schedule` | Dry-run today's channel plan — staleness-weighted, high-tier floor. No browser. |
+| `python -m automato scheduled-run` | Execute it: one video per selected channel, sequentially; channels already published today are skipped. |
+| `python -m automato ab-results [--fetch]` | Roll up provider choices × post-publish analytics; `--fetch` pulls Studio numbers once videos are ~7 days old. |
 
 Add `-v` to any command for verbose logs.
 
@@ -154,12 +170,15 @@ Each run builds everything under `output/<run_id>/`:
 
 ```
 output/<run_id>/
-├── script.json        # generated script (title, narration, captions, image prompts)
-├── assets/            # background images from Perchance (bg_00.jpg, …)
-├── voiceover.wav      # narrated audio
-├── final.mp4          # assembled 1080x1920 short
-├── post_url.json      # {"url": …} once published
-└── run_state.json     # per-stage ledger → enables --resume
+├── script.json            # generated script (title, narration, captions, image prompts)
+├── assets/                # background images from Perchance (bg_00.jpg, …)
+├── voiceover.wav          # narrated audio
+├── final.mp4              # assembled 1080x1920 short
+├── post_url.json          # {"url": …} once published
+├── provider_choices.json  # per-stage provider pick + weights + degradation (A/B ledger)
+├── upload_attempted.json  # durable "upload attempt started" marker (double-publish guard)
+├── performance.json       # views/retention — written by `ab-results --fetch`
+└── run_state.json         # per-stage ledger → enables --resume
 ```
 
 Resume is resumable: a run that died at, say, the TTS stage restarts at voiceover,
@@ -195,6 +214,56 @@ a WAV) — the stage is pure local FFmpeg + Pillow.
 
 ---
 
+## Provider selection & measuring what actually won
+
+Every provider-backed stage is an **ordered failure chain** whose *lead* is
+rotated by a weighted roll on each run — `AUTOMATO_<STAGE>_WEIGHTS` (weight `0`
+keeps a provider in the chain as a fallback but never lets it lead), or pinned
+with `AUTOMATO_<STAGE>_PIN` for a deterministic lead. Defaults live in
+`config.DEFAULT_WEIGHTS`:
+
+| Stage | Default weights |
+|---|---|
+| `tts` | edge_tts 4 · soundtools 1 · pyttsx3 1 |
+| `assets` | perchance 4 · pollinations 1 |
+| `llm` | ai_studio 4 · duckai 1 · ask_brave 1 · gemini 0 · chatgpt 0 |
+
+Semantics: a *clean* roll (the lead produced the stage) publishes at your normal
+visibility; a *degraded* stage (used ≠ primary, or a mid-chain failure that a
+fallback had to absorb) downgrades the publish to `unlisted`; high-tier channels
+are always forced to that health semantics. Opt a stage into real experiment
+mode with `AUTOMATO_<STAGE>_AB_TEST=1` — even then, high-tier channels always
+stay forced to health. Every stage's choice lands in
+`output/<run_id>/provider_choices.json`.
+
+`python -m automato ab-results --fetch` reads each published run's Studio
+highlight cards into `performance.json` (gated at `AB_RESULTS_MIN_AGE_DAYS`, 7,
+so young videos aren't misread as zero), then `python -m automato ab-results`
+rolls providers × performance up per stage — views, mean/median, retention. A
+fetch that legitimately finds no data yet stays **retryable**, so one slow
+Studio render can never lock a run out of the report.
+
+## Channel scheduling (one video per channel per day)
+
+`channel-schedule` is a dry-run planner; `scheduled-run` executes it for real.
+Both weight the channel registry by **days-since-last-upload** (capped at 30;
+never-uploaded channels count as 30), add a minimum floor for high-tier
+channels and a small uniform jitter, then assign the day's budget (default 2)
+by weighted sample. The whole allocation — weights, selection, per-channel run
+outcomes — is appended to `output/channel_selections.json` for audit.
+
+```powershell
+python -m automato channel-schedule        # preview today's selection (no browser)
+python -m automato scheduled-run           # run one video per selected channel
+```
+
+`scheduled-run` runs channels **sequentially** (the engine refuses parallel
+runs), skips any channel that already uploaded today (`channels_active_on_date`)
+so a crash-recovery re-invocation never double-publishes, and exits `1` if any
+channel failed. Knobs: the `AUTOMATO_SCHEDULER_*` variables below.
+
+---
+
 ## Logging in
 
 Only **YouTube requires a signed-in session**. Open a visible browser, sign in,
@@ -217,7 +286,10 @@ plan. You can ship a fully working pipeline with *zero* sign-ins except YouTube:
 4. `chatgpt` (ChatGPT web guest) — no account, region-gated, **last resort**
 
 Set your own order with `AUTOMATO_LLM_NO_LOGIN_CHAIN="duckai,gemini,ask_brave,chatgpt"`.
-The winning provider is reported in the run log.
+The winning provider is reported in the run log (and recorded in
+`provider_choices.json`); the lead can also be rotated by `AUTOMATO_LLM_WEIGHTS`
+or pinned with `AUTOMATO_LLM_PIN` — see
+[Provider selection](#provider-selection--measuring-what-actually-won).
 
 ---
 
@@ -257,8 +329,9 @@ Change the default manifest in `config.py` (`DEFAULT_WORKFLOW`) to stop passing
 
 ### Tuning speech
 
-- **Backend** — `--tts auto` tries SoundTools (browser) → `edge_tts` → `pyttsx3`.
-  `--tts edge_tts` pins Microsoft Edge's neural TTS: fast, offline-ish, no browser.
+- **Backend** — `--tts auto` rolls a weighted lead over `edge_tts` → SoundTools →
+  `pyttsx3` (defaults in `config.DEFAULT_WEIGHTS`). `--tts edge_tts` pins
+  Microsoft Edge's neural TTS: fast, offline-ish, no browser.
 - **Voice** — set `EDGE_TTS_VOICE = "en-US-ChristopherNeural"` in `config.py` to
   any edge-tts voice that fits the tone.
 - **Language-aware routing** — general narration always uses the local chain. Text
@@ -299,6 +372,9 @@ the full, current list:
 |---|---|
 | `AUTOMATO_VISIBILITY` | `public\|unlisted\|private` default for `run`. |
 | `AUTOMATO_TTS_PROVIDER` | TTS backend default (auto chain). |
+| `AUTOMATO_<STAGE>_WEIGHTS` | Per-stage `provider:weight` list (`tts` / `assets` / `llm`); weight 0 = fallback-only, never leads. |
+| `AUTOMATO_<STAGE>_PIN` | Forces one provider as that stage's lead, bypassing the roll. |
+| `AUTOMATO_<STAGE>_AB_TEST` | `1` opts the stage into experiment mode (else health semantics: any fallback degrades → unlisted). |
 | `AUTOMATO_LLM_PROVIDER` | Preferred scripting provider (`gemini` — no login — by default; `ai_studio` requires a paid-gated login). |
 | `AUTOMATO_LLM_NO_LOGIN_CHAIN` | Comma-separated order of the no-login fallbacks. |
 | `AUTOMATO_BROWSER` / `AUTOMATO_BRAVE_PATH` | Engine + Brave binary path. |
@@ -315,6 +391,12 @@ the full, current list:
 | `AUTOMATO_PUBLISH_CONFIRM` | `0` disables the interactive confirm-before-publish prompt. |
 | `AUTOMATO_TOPIC_IDEATION_ENABLED` | `0` disables the Ask Studio topic-ideation pre-stage. |
 | `AUTOMATO_ASK_STUDIO_QUESTION` | Alternative channel-scoped question for Ask Studio. |
+| `AUTOMATO_PUBLISH_READY_WAIT_S` | Grace (s) for the upload dialog to become publish-ready before the engine clicks Publish (floor 60, default 960). |
+| `AUTOMATO_SCHEDULER_BUDGET` | Daily run count for `channel-schedule` / `scheduled-run` (default 2). |
+| `AUTOMATO_SCHEDULER_HIGH_TIER_FLOOR` | Minimum staleness weight for high-tier channels (default 2.0). |
+| `AUTOMATO_SCHEDULER_RANDOM_RANGE` | Top of the uniform jitter added to each channel's weight. |
+| `AUTOMATO_SCHEDULER_NEVER_UPLOADED_STALENESS` | Days of staleness assumed for never-uploaded channels (default 30). |
+| `AUTOMATO_SCHEDULER_SEED` | Deterministic jitter seed for reproducible dry-runs/tests. |
 | `AUTOMATO_BACKUP_PASSPHRASE` | AES passphrase for backups (else one is generated & printed). |
 
 Tuning timers (timeouts, retry backoff, settle intervals, deadline seconds) are
@@ -404,7 +486,8 @@ Full how-to (forking, diffing configs, relocating): [`GUIDE_CUSTOMIZATION.md`](G
    AI content in the description (see Safety).
 2. **Unattended schedule** — `--headless` + a cron/Task Scheduler job, spaced at
    least 2× the longest run, with its own log file; exit code drives alerting.
-   Backup on the same cadence.
+   For the multi-channel version, `channel-schedule`/`scheduled-run` rotate one
+   video per channel per day (staleness-weighted). Backup on the same cadence.
 3. **Niche experiments without risk** — fork via `backup` → `restore --dir`, run a
    throwaway `--visibility private` video against the fork. The proven install
    stays untouched.
@@ -444,7 +527,20 @@ reclaimed automatically once it ages out.
 
 **Can I run two videos at once?** No — by design. Sharing one set of Chromium
 profiles across parallel runs corrupts sessions. Use a separate installed copy if
-you truly need parallelism (backup/restore a second root).
+you truly need parallelism (backup/restore a second root). A day's
+`channel-schedule`/`scheduled-run` therefore runs its channels sequentially.
+
+**How do I publish one video per channel per day automatically?** Preview the
+day's selection with `python -m automato channel-schedule`, then execute it with
+`python -m automato scheduled-run`. Channels that already uploaded today are
+skipped automatically, and the day's allocation + outcomes land in
+`output/channel_selections.json`.
+
+**Which provider actually made my video — and how well did it do?** Every
+stage's pick, weights, and degradation are recorded in
+`output/<run_id>/provider_choices.json`. `python -m automato ab-results` joins
+that with the video's Studio analytics (`--fetch` pulls the numbers once videos
+are ~7 days old).
 
 **The model ignored my script format.** Loosen the preamble in
 `script_prompts.py` and/or widen `_parse_script` in `generic_llm.py`. The engine

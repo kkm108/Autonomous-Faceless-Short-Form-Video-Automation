@@ -61,3 +61,18 @@ def test_settings_constants_have_defaults_in_typed_settings():
             if value is None or value == "":
                 bare.append(f"config.{name} <- {path.relative_to(_PACKAGE_ROOT)}")
     assert not bare, "config references that resolve to None/empty:\n" + "\n".join(bare)
+
+
+def test_publish_ready_wait_env_override(monkeypatch):
+    """YOUTUBE_PUBLISH_READY_WAIT_S honors AUTOMATO_PUBLISH_READY_WAIT_S (batch
+    finding: the 300s default expired on EVERY first-attempt publish, leaving
+    drafts for the operator), with a 60s floor against botched overrides."""
+    import importlib
+
+    for raw, expected in (("123", 123), ("10", 60), ("", 960), ("0", 60)):
+        monkeypatch.setenv("AUTOMATO_PUBLISH_READY_WAIT_S", raw)
+        importlib.reload(config)
+        assert config.YOUTUBE_PUBLISH_READY_WAIT_S == expected, f"raw={raw!r}"
+    monkeypatch.setenv("AUTOMATO_PUBLISH_READY_WAIT_S", "960")
+    importlib.reload(config)
+    assert config.YOUTUBE_PUBLISH_READY_WAIT_S == 960

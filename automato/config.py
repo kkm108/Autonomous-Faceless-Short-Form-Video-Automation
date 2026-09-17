@@ -333,11 +333,16 @@ YOUTUBE_POST_PUBLISH_SLEEP_S = 6      # settle after clicking Publish/Done
 # row to appear (R6 publish-stale-URL surveillance finding).
 YOUTUBE_PUBLISH_LISTING_WAIT_S = 420
 # The final Publish/Done button stays aria-disabled until the just-uploaded
-# file finishes processing (Shorts transcoding can take a few minutes); jumping
+# file finishes processing (Shorts transcoding can take a while); jumping
 # straight to the click exhausts Playwright's click timeout against the disabled
 # button + its overlay backdrop (E2E double observation on the R7 publishes).
-# Wait for it to enable before clicking.
-YOUTUBE_PUBLISH_READY_WAIT_S = 300
+# Wait for it to enable before clicking. NB: on the A/B batch channel (live,
+# 2026) EVERY first attempt exceeded the old 300s window, leaving each video as
+# a Studio DRAFT the operator had to publish by hand — transcoding routinely
+# takes minutes longer than 300s there, so the wait is now longer by default and
+# overridable via AUTOMATO_PUBLISH_READY_WAIT_S (floor 60s).
+YOUTUBE_PUBLISH_READY_WAIT_S = max(
+    60, int(os.environ.get("AUTOMATO_PUBLISH_READY_WAIT_S", "960") or 960))
 
 
 # ---- Brand-channel routing (R7/R8) ----

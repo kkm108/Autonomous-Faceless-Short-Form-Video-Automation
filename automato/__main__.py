@@ -274,6 +274,122 @@ def cmd_plan(args) -> int:
     return 0
 
 
+def cmd_channel_schedule(args) -> int:
+    """Channel-scheduling dry-run: decide which channels get today's videos.
+
+    Weights each channel by days-since-last-upload (from run history /
+    post_url.json records), with a uniform-random component and a minimum
+    weight floor for high-tier channels. Prints today's planned assignments
+    WITHOUT executing anything; channels that already uploaded today are shown
+    as skipped so the preview matches what ``scheduled-run`` will actually do.
+    Records the day's selection + weights to the audit trail unless --no-record."""
+    from datetime import date
+
+    from . import channel_scheduler as sched
+
+    today = date.today()
+    exclude = sched.channels_active_on_date(root=config.OUTPUT_DIR,
+                                            target_date=today)
+    try:
+        plan = sched.select_channels_for_day(
+            budget=args.budget or None,
+            seed=args.seed,
+            exclude=exclude,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return _EXIT_USAGE
+
+    sched.print_day_plan(plan)
+    if not args.no_record:
+        path = sched.record_day_plan(plan)
+        print(f"\nAudit record -> {path}")
+    return 0
+
+
+def cmd_scheduled_run(args) -> int:
+    """R12-W2: execute today's channel plan for real.
+
+    Selects channels by staleness (same engine as ``channel-schedule``),
+    records the allocation, then runs one video per selected channel
+    SEQUENTIALLY (the engine refuses concurrent runs: ``run_guard``), letting
+    each channel's Ask Studio pre-stage derive its topic. Channels that already
+    have an upload attempt today are excluded so a crash-recovery re-invocation
+    never double-publishes a channel.
+    """
+    from datetime import date
+
+    from . import channel_scheduler as sched
+    from .adapters.base import ExecutorError
+    from .backup import RestoreError
+    from .browser.session import AuthRequiredError
+    from .manifest import WorkflowError
+    from .orchestrator import run_workflow
+    from .providers import register_all
+    from .run_guard import RunGuardError
+    from .settings import RunSettings, SettingsError
+
+    register_all()
+    config.ensure_dirs()
+
+    today = date.today()
+    exclude = sched.channels_active_on_date(root=config.OUTPUT_DIR,
+                                            target_date=today)
+    plan = sched.select_channels_for_day(
+        budget=args.budget or None, seed=args.seed, exclude=exclude)
+    sched.print_day_plan(plan)
+
+    if not plan.selected:
+        # still record the (empty) allocation so the day's audit trail exists
+        sched.record_day_plan(plan)
+        print("\nNothing to run today (all channels already accounted for).")
+        return _EXIT_OK
+
+    # Record the allocation BEFORE any run so a crash mid-budget still leaves
+    # today's selection in the audit trail (it is replaced below with outcomes).
+    sched.record_day_plan(plan)
+
+    runs: dict = {}
+    failed = 0
+    for slot, ch in enumerate(plan.selected, start=1):
+        settings = RunSettings.defaults()
+        settings.channel_name = ch          # explicit: ideation + publish route here
+        settings.publish_confirm = False    # unattended scheduler: no y/N prompt
+
+        missing = config.validate_environment(settings.tts_provider)
+        if missing:
+            print(f"\nERROR: {ch}: TTS provider {settings.tts_provider!r} needs "
+                  f"missing packages: {', '.join(missing)}. Skipping.")
+            runs[ch] = {"status": "blocked", "reason": "missing_packages"}
+            failed += 1
+            continue
+
+        print(f"\n>>> [{slot}/{len(plan.selected)}] Running channel: {ch}")
+        try:
+            state = run_workflow(args.workflow, {}, settings=settings)
+            out = {"run_id": state.run_id, "status": state.status}
+            publish = (state.completed or {}).get("publish") or {}
+            if publish.get("url"):
+                out["url"] = publish["url"]
+                out["visibility"] = publish.get("visibility")
+            runs[ch] = out
+            print(f"    {ch} -> {state.run_id} ({state.status})"
+                  + (f"  url={out.get('url')}" if out.get("url") else ""))
+        except (ExecutorError, WorkflowError, RestoreError, AuthRequiredError,
+                RunGuardError, SettingsError) as exc:
+            log = logging.getLogger("automato.cli")
+            log.error("Scheduled channel %s failed: %s", ch, exc)
+            sys.stderr.write(f"ERROR: {ch}: {exc}\n")
+            runs[ch] = {"status": "failed", "error": str(exc)}
+            failed += 1
+
+    # Final audit entry: allocation + the weights that produced it + outcomes.
+    sched.record_day_plan(plan, runs=runs)
+    ok = len(plan.selected) - failed
+    print(f"\nScheduled day complete: {ok}/{len(plan.selected)} video(s) delivered.")
+    return _EXIT_ERROR if failed else _EXIT_OK
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="automato",
                                      description="Autonomous faceless short-form video automation")
@@ -293,6 +409,36 @@ def main(argv=None) -> int:
                         help="Workflow manifest name")
     p_plan.add_argument("-v", "--verbose", action="store_true")
     p_plan.set_defaults(func=cmd_plan)
+
+    p_sched = sub.add_parser(
+        "channel-schedule",
+        help="Channel-scheduling dry-run: which channels get today's videos, "
+             "weighted by days-since-last-upload with a high-tier floor. "
+             "Prints the plan without executing anything.")
+    p_sched.add_argument("--budget", type=int, default=None,
+                         help="Daily run count (default: AUTOMATO_SCHEDULER_BUDGET, "
+                              "else config default)")
+    p_sched.add_argument("--seed", type=int, default=None,
+                         help="Deterministic jitter seed (default: random)")
+    p_sched.add_argument("--no-record", action="store_true",
+                         help="Skip appending to the channel_selections.json "
+                              "audit trail (experimental/CI use)")
+    p_sched.add_argument("-v", "--verbose", action="store_true")
+    p_sched.set_defaults(func=cmd_channel_schedule)
+
+    p_srun = sub.add_parser(
+        "scheduled-run",
+        help="Execute today's channel plan for real: select channels by "
+             "staleness, then run one video per selected channel sequentially "
+             "(never re-picks a channel that already uploaded today).")
+    p_srun.add_argument("--budget", type=int, default=None,
+                        help="Daily run count (default: AUTOMATO_SCHEDULER_BUDGET)")
+    p_srun.add_argument("--seed", type=int, default=None,
+                        help="Deterministic jitter seed (default: random)")
+    p_srun.add_argument("--workflow", default=config.DEFAULT_WORKFLOW,
+                        help="Workflow manifest name")
+    p_srun.add_argument("-v", "--verbose", action="store_true")
+    p_srun.set_defaults(func=cmd_scheduled_run)
 
     p_ab = sub.add_parser(
         "ab-results",

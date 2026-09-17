@@ -480,6 +480,43 @@ def test_fetch_performance_respects_min_age(tmp_path):
     assert out == []
 
 
+def test_fetch_performance_skips_run_with_real_analytics(tmp_path):
+    """A run with real analytics is final — never re-scraped."""
+    _fake_run(tmp_path, "run_ok",
+              "https://www.youtube.com/watch?v=OKXXX000002",
+              choices={"tts": {"provider": "edge_tts"}},
+              perf={"views": 42, "avg_view_duration_s": 5.0, "status": "ok"})
+    out = ab_results.fetch_performance(root=tmp_path, session=None,
+                                       min_age_days=0.0)
+    assert out == []
+
+
+def test_fetch_performance_retries_no_data_records(tmp_path, monkeypatch):
+    """A persisted no_data record is a transient miss, not a lock: a later
+    fetch must re-attempt it once real analytics exist, else one slow Studio
+    render could silently starve the A/B correlation forever."""
+    run_dir = _fake_run(
+        tmp_path, "run_nd",
+        "https://www.youtube.com/watch?v=NDXXX000001",
+        choices={"tts": {"provider": "edge_tts"}},
+        perf={"status": "no_data"})
+
+    class _Session:
+        def first_page(self):
+            return None
+
+    monkeypatch.setattr(
+        ab_results.studio_metrics, "fetch_metrics",
+        lambda page, video_id: {"views": 77, "avg_view_duration_s": 9.0,
+                                "video_id": video_id, "status": "ok"})
+    fetched = ab_results.fetch_performance(root=tmp_path, session=_Session(),
+                                           min_age_days=0.0)
+    assert fetched == [{"run_id": "run_nd", "status": "ok", "views": 77}]
+    recorded = json.loads((run_dir / "performance.json").read_text(encoding="utf-8"))
+    assert recorded["views"] == 77
+    assert recorded["status"] == "ok"
+
+
 def test_legacy_choices_backfills_regression(tmp_path):
     d = _fake_run(tmp_path, "run_z", url=None)
     (d / "word_timings.json").write_text(
