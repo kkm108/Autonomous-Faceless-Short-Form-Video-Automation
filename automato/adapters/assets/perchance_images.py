@@ -31,7 +31,7 @@ from itertools import cycle
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from ... import config
+from ... import ab_test, config
 
 log = logging.getLogger(__name__)
 
@@ -260,6 +260,43 @@ def run(ctx, inputs, run_dir, session):
         _mark_degraded(run_dir, result, reason, rescued=len(saved), saved=len(saved))
         return result
 
+    # R11-W2: weighted selection over the assets chain. The roll may lead with
+    # the keyless fallback (pollinations) on purpose — an experiment arm that
+    # publishes at normal visibility on a low-tier channel only when the roll
+    # itself landed it there cleanly (choice recorded to provider_choices.json).
+    # PERCHANCE_ENABLED=0 above is an explicit operator override and always
+    # degrades, exactly as before.
+    base_chain = ["perchance", "pollinations"]
+    rotated, picked, chosen_by = ab_test.lead_with("assets", base_chain)
+    primary = base_chain[0]
+
+    if rotated[0] == "pollinations":
+        log.info("Assets lead by %s selection: keyless fallback (pollinations)",
+                 chosen_by)
+        rescued = _top_up_fallback(assets_dir, saved, prompts, image_count)
+        if not saved:
+            raise RuntimeError(
+                "Weighted lead routed assets to the keyless fallback, "
+                "which produced no images")
+        result = {"images": str(assets_dir), "image_files": saved}
+        degraded_reason, excluded = ab_test.decide_degraded(
+            "assets", name, chosen_by, picked, "pollinations", False, primary)
+        if degraded_reason:
+            _mark_degraded(run_dir, result,
+                           f"Assets lead rolled to the keyless fallback "
+                           f"({len(saved)}/{image_count} images): "
+                           f"{degraded_reason}",
+                           rescued=len(saved), saved=len(saved))
+        ab_test.record_choice(run_dir, "assets", {
+            "provider": "pollinations", "primary": primary,
+            "chosen_by": chosen_by, "picked": picked,
+            "candidates": base_chain,
+            "weights": ab_test.weights_for("assets"),
+            "failed": [], "degraded": degraded_reason is not None,
+            "excluded_from_degradation": excluded,
+        })
+        return result
+
     page = session.first_page()
     from ...resilience.interaction import ElementInteractor
 
@@ -376,10 +413,24 @@ def run(ctx, inputs, run_dir, session):
         raise RuntimeError("Perchance produced no saved images")
 
     result = {"images": str(assets_dir), "image_files": saved}
-    if rescued > 0:
+    # A partial "rescue" means the browser generator fell short and the keyless
+    # fallback served part of the set — a failure fallback that degrades in BOTH
+    # modes (the choice record keeps both the origin and the fallout honest).
+    degraded_reason, excluded = ab_test.decide_degraded(
+        "assets", name, chosen_by, picked,
+        "perchance" if rescued == 0 else "pollinations", rescued > 0, primary)
+    if degraded_reason:
         reason = (f"Perchance fell short ({rescued}/{image_count} images from "
                   f"the keyless fallback provider)")
         _mark_degraded(run_dir, result, reason, rescued=rescued, saved=len(saved))
+    ab_test.record_choice(run_dir, "assets", {
+        "provider": "perchance" if rescued == 0 else "pollinations",
+        "primary": primary, "chosen_by": chosen_by, "picked": picked,
+        "candidates": base_chain, "weights": ab_test.weights_for("assets"),
+        "rescued": rescued, "failed": [] if rescued == 0 else ["perchance"],
+        "degraded": degraded_reason is not None,
+        "excluded_from_degradation": excluded,
+    })
     return result
 
 

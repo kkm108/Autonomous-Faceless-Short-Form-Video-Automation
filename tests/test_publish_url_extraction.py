@@ -12,9 +12,21 @@ import pytest
 from automato.adapters.publish.youtube_studio import (
     _extract_id_for_title,
     _id_from_href,
+    _is_draft_text,
     _known_video_ids,
     _omnisearch_results,
 )
+
+
+def test_draft_marker_detection():
+    assert _is_draft_text("This video is in a draft state\nEdit draft\nChannel content")
+    assert _is_draft_text("Edit draft and continue later")
+    assert not _is_draft_text("How a Cache Makes Code Lightning Fast\nDetails\nAnalytics")
+    assert not _is_draft_text("")
+
+
+def test_draft_marker_case_insensitive():
+    assert _is_draft_text("THIS VIDEO IS IN A DRAFT STATE")
 
 
 def test_id_from_href_variants():
@@ -184,6 +196,35 @@ def test_omnisearch_results_dismisses_panel_with_escape():
     page = _stub_omnisearch_page([])
     _omnisearch_results(page, "Anything")
     assert page.keyboard.press.call_count > 0
+
+
+def test_omnisearch_clears_previous_query_before_typing():
+    # Regression: a SECOND omnisearch in the same Studio session must clear the
+    # box first. Typing without clearing concatenates the old and new queries
+    # into a garbled doubled title (observed live on the follow-up search),
+    # which defeats the filtered-match check.
+    page = _stub_omnisearch_page([])
+    page.locator.return_value.first.evaluate.return_value = ""
+    _omnisearch_results(page, "The Next Query")
+    presses = [c.args[0] for c in page.keyboard.press.call_args_list]
+    assert "Control+A" in presses and "Backspace" in presses
+    typed = "".join(c.args[0] for c in page.keyboard.type.call_args_list)
+    assert "The Next Query" in typed
+
+
+def test_omnisearch_force_clears_leftover_via_exec_command():
+    # Keystroke select-all + delete can miss text in some boxes; give the
+    # executeCommand fallback a chance to run when the box still has content.
+    page = _stub_omnisearch_page([])
+    evals = []
+
+    def fake_eval(fn, **kw):
+        evals.append(fn)
+        return "stale-query" if "e.value" in (fn or "") else ""
+
+    page.locator.return_value.first.evaluate.side_effect = fake_eval
+    _omnisearch_results(page, "Next")
+    assert any("execCommand" in (e or "") for e in evals)
 
 
 def test_mark_upload_attempted_writes_durable_marker(tmp_path):

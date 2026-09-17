@@ -322,6 +322,29 @@ def _omnisearch_results(page, query: str, timeout_s: int = 6) -> List[tuple]:
     try:
         q.first.click(timeout=4000, force=True)
         time.sleep(0.3)
+        # The box retains the PREVIOUS search's text across omnisearch calls in
+        # the same Studio session; typing without clearing CONCATENATES
+        # old+new queries (observed live: second search produced a garbled
+        # doubled title), which defeats the filtered-match check below. Clear
+        # keystroke-style (select-all + delete) so the panel still receives
+        # keystroke-by-keystroke input, which its typed-filter requires.
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            leftover = q.first.evaluate(
+                "e => e.value || "
+                "(document.activeElement && document.activeElement.value) || ''")
+        except Exception:  # noqa: BLE001
+            leftover = ""
+        if leftover:
+            try:
+                q.first.evaluate(
+                    "e => { e.select && e.select(); document.execCommand('delete'); }")
+            except Exception:  # noqa: BLE001
+                pass
         page.keyboard.type((query or "")[:60], delay=30)
         # The panel first renders the UNFILTERED recent list, then swaps in the
         # query-filtered rows a beat later (debounce). Waiting on raw presence
@@ -577,6 +600,37 @@ def _confirm_publish(settings, title: str, channel_name: str,
     return True
 
 
+def _is_draft_text(text: str) -> bool:
+    """Studio's "draft state" editor marker, matched on flattened page text.
+
+    A finished upload whose Publish/Done step was never completed sits in Studio
+    as a DRAFT. omnisearch and the uploads list BOTH surface drafts, so any
+    "found" video must be checked against this marker before it can be recorded
+    as a published run.
+    """
+    lowered = (text or "").lower()
+    return ("this video is in a draft state" in lowered
+            or "edit draft" in lowered)
+
+
+def _is_draft_state(page, vid) -> "bool | None":
+    """True/False when Studio definitively reports ``vid``'s publish state,
+    None when the state could not be verified (page/goto failure).
+
+    Never returns a guess: a check that could not read Studio yields None so the
+    caller can refuse to auto-record rather than risk a false "published".
+    """
+    try:
+        page.goto(f"https://studio.youtube.com/video/{vid}/editor",
+                  wait_until="domcontentloaded", timeout=30000)
+        time.sleep(config.YOUTUBE_UI_SETTLE_S)
+        text = page.locator("body").inner_text(timeout=10000)
+    except Exception:  # noqa: BLE001
+        log.warning("Could not verify publish state of video %s", vid)
+        return None
+    return _is_draft_text(text)
+
+
 def _recent_upload_exists(page, title: str, timeout_s: int = 60) -> Optional[str]:
     """Return ``title``'s video id among Studio's recent uploads, or None.
 
@@ -671,8 +725,21 @@ def _dedupe_existing_title(page, run_dir: Path, title: str,
                            visibility: str) -> Optional[dict]:
     """Marker-independent R9 dedupe: if a video with ``title`` already exists on
     the channel, record it as this run's publish result and signal the caller to
-    skip the upload. Returns the record dict when a match is found, else None."""
+    skip the upload. Returns the record dict when a match is found, else None.
+
+    A matching video that is still an unpublished Studio DRAFT is never treated
+    as an existing publication — recording a draft as this run's result would
+    fabricate a published run (same defect class as the resume path, observed
+    live). The operator resolves the draft and re-runs."""
     already = _omnisearch_ids_for_title(page, title, timeout_s=20)
+    if already and _is_draft_state(page, already):
+        from ..base import ExecutorError
+        raise ExecutorError(
+            f"A video titled '{title}' is still a Studio DRAFT (video {already}) "
+            "from a previous attempt — it was never published. Complete or "
+            "delete it in Studio before re-running the kind of title.",
+            retryable=False,
+        )
     if already:
         log.warning("Video with title '%s' already exists on the channel (%s); "
                     "recording it as this run's publish and skipping the upload "
@@ -691,11 +758,30 @@ def _handle_done_timeout(run_dir: Path, channel_name: str, title: str,
     (R9 incident, observed live). Write the attempt marker FIRST (so no later
     retry can re-upload), give the upload one short bounded Studio-search
     check, and if it still hasn't surfaced, stop and ask the operator to verify
-    in Studio before resuming."""
+    in Studio before resuming.
+
+    The search check finds DRAFTS too: when the Done button never enabled, the
+    video is typically still an unpublished Studio DRAFT, and recording it as
+    this run's success fabricates a published run and poisons the A/B record
+    (observed live on both batch runs). Only a video whose publish state is
+    CONFIRMED (definitively NOT a draft) is recorded; anything else raises a
+    clear non-retryable error asking the operator to complete or delete it."""
     _mark_upload_attempted(run_dir, title, channel_name, visibility)
     check = _omnisearch_ids_for_title(page, title, timeout_s=15)
     if check:
-        return _record_publish(run_dir, check, visibility)
+        state = _is_draft_state(page, check)
+        if state is False:
+            return _record_publish(run_dir, check, visibility)
+        detail = (f"still a Studio DRAFT (video {check})" if state
+                  else "unverified (could not read Studio)")
+        raise ExecutorError(
+            f"Publish/Done button never became clickable after waiting "
+            f"{config.YOUTUBE_PUBLISH_READY_WAIT_S}s and the upload is "
+            f"{detail}. Complete or delete it in Studio, then resume "
+            f"(resume will detect it and will NOT upload a duplicate). "
+            f"Refusing to record an un-published upload as a successful run.",
+            retryable=False,
+        )
     raise ExecutorError(
         f"Publish/Done button never became clickable after waiting "
         f"{config.YOUTUBE_PUBLISH_READY_WAIT_S}s and the uploaded video was "
@@ -742,16 +828,39 @@ def run(ctx, inputs, run_dir, session):
             # list may not render yet); reuse it directly instead of re-extracting
             # from the list, which previously missed the row and falsely refused.
             vid = _recent_upload_exists(page_check, title_hint)
+            if vid and _is_draft_state(page_check, vid):
+                # A finished upload whose final Publish/Done step was never
+                # completed sits in Studio as a DRAFT. It must NOT be recorded
+                # as this run's published result: that fabricates success and
+                # poisons the A/B record (observed live: Run A was recorded as
+                # uploaded while still a draft). Ask the operator to complete or
+                # delete it in Studio before resuming.
+                raise ExecutorError(
+                    "The previous upload was found, but it is still a Studio "
+                    f"DRAFT (video {vid}) — the final Publish step never "
+                    "completed. Complete the publish in Studio (or delete the "
+                    "draft) and resume; this run will then detect the published "
+                    "video and record it without re-uploading. Refusing to "
+                    "record a draft as a published run.",
+                    retryable=False,
+                )
             if vid:
-                # The upload did go through; record it and treat as done.
+                # The upload did go through; record it and treat as done. The
+                # visibility the upload was *made* with is the one the timed-out
+                # attempt already wrote to upload_attempted.json — never paper
+                # over it with "unlisted", or the A/B record lies about how the
+                # video is actually published.
+                attempted_vis = (json.loads(
+                    (run_dir / "upload_attempted.json").read_text(encoding="utf-8")
+                ).get("visibility") or "unlisted")
                 url = f"https://www.youtube.com/watch?v={vid}"
                 out_path = run_dir / "post_url.json"
                 out_path.write_text(json.dumps(
-                    {"status": "uploaded", "visibility": "unlisted",
+                    {"status": "uploaded", "visibility": attempted_vis,
                      "url": url}, ensure_ascii=False, indent=2),
                     encoding="utf-8")
                 return {"post_url": str(out_path), "url": url,
-                        "visibility": "unlisted"}
+                        "visibility": attempted_vis}
         except Exception as exc:  # noqa: BLE001
             raise ExecutorError(
                 f"Previous upload may have succeeded but cannot be confirmed; "

@@ -17,7 +17,7 @@ import re
 import time
 from typing import Optional
 
-from ... import config
+from ... import ab_test, config
 from ...channels import resolve_language, risk_tier_for, tone_for
 from ...llm import chat as browser_chat
 from ...llm import no_login
@@ -147,6 +147,24 @@ def _provider_sequence(preferred: str) -> list:
     return ["ai_studio", *no_login_providers]
 
 
+def _lead_providers(preferred: str):
+    """Return ``(providers, picked, chosen_by, base_chain)`` for the scripting
+    chain after applying the R11-W2 weighted selection.
+
+    An explicit operator choice (``AUTOMATO_LLM_PROVIDER`` pointing outside
+    ``ai_studio``) is treated exactly like ``AUTOMATO_TTS_PIN``: a deterministic
+    lead that bypasses the weight roll — the operator expressed an intent and
+    the engine follows it. The default ``ai_studio`` preference is the only one
+    that enters the weight roll.
+    """
+    base_chain = _provider_sequence(preferred)
+    if preferred == "ai_studio":
+        providers, picked, chosen_by = ab_test.lead_with("llm", base_chain)
+    else:
+        providers, picked, chosen_by = base_chain, preferred, "pinned"
+    return providers, picked, chosen_by, base_chain
+
+
 def _ask_no_login(page, provider: str, prompt_text: str) -> Optional[dict]:
     if provider == "duckai":
         reply = browser_chat.ask(page, prompt_text)
@@ -258,7 +276,7 @@ def run(ctx, inputs, run_dir, session):
     ux = ElementInteractor(page, provider="ai_studio", settings=ctx.settings)
     locs = ProviderLocations(AI_STUDIO_LOCS)
     preferred = ctx.settings.llm_provider or "ai_studio"
-    providers = _provider_sequence(preferred)
+    providers, picked, chosen_by, base_chain = _lead_providers(preferred)
     # R8-A2/A3: one registry lookup feeds the scripting prompt's language and
     # tone, so channel, script language and TTS voice can never disagree.
     channel = ctx.settings.channel_name
@@ -267,7 +285,11 @@ def run(ctx, inputs, run_dir, session):
     prompt_text = build_system_prompt(topic, language=language, tone=tone)
 
     script = None
+    used = None
+    failed: list = []
     for provider in providers:
+        if script is not None:
+            break
         attempts = 3 if provider == "duckai" else 2
         for attempt in range(1, attempts + 1):
             try:
@@ -281,15 +303,28 @@ def run(ctx, inputs, run_dir, session):
                 script = None
             if script is not None:
                 log.info("Script obtained via provider '%s'", provider)
+                used = provider
                 break
             log.warning("Provider '%s' attempt %d produced no parseable script; "
                         "retrying", provider, attempt)
             time.sleep(5)
-        if script is not None:
-            break
+        if used is None:
+            failed.append(provider)
 
     if script is None:
         raise RuntimeError("Failed to obtain a script from the LLM")
+
+    # R11-W2: the provider that actually served the script, and the origin of the
+    # lead (weight roll vs operator pin) go into the per-run choice record for
+    # the ab-results correlation. Scripting has no downgrade semantics: every
+    # script provider parses the same delimited format through the same gates.
+    ab_test.record_choice(run_dir, "llm", {
+        "provider": used, "primary": base_chain[0],
+        "chosen_by": chosen_by, "picked": picked,
+        "candidates": base_chain, "weights": ab_test.weights_for("llm"),
+        "failed": failed, "degraded": False,
+        "note": "scripting publishes with its normal intended visibility",
+    })
 
     out = run_dir / "script.json"
     out.write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")

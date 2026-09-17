@@ -201,6 +201,39 @@ def cmd_trend(args) -> int:
     return 0
 
 
+def cmd_ab_results(args) -> int:
+    """R11-W3: correlate recorded provider choices with post-publish analytics."""
+    from . import ab_results
+
+    app = config.OUTPUT_DIR
+    if args.fetch:
+        from .browser.factory import PersistentBrowser
+        from .browser.session import profile_dir_for
+
+        settings = RunSettings.from_args(args)
+        headless = bool(args.headless)
+        browser = PersistentBrowser(
+            profile_dir_for("youtube"),
+            headless=headless,
+            browser_choice=settings.browser_choice,
+            headless_mode="new" if headless else "headed",
+        )
+        with browser:
+            fetched = ab_results.fetch_performance(
+                app, session=browser, min_age_days=args.days)
+        for r in fetched:
+            print(f"  {r['run_id']}: {r['status']}"
+                  + (f"  views={r['views']}" if r.get("views") is not None else ""))
+        print(f"{len(fetched)} video(s) fetched.")
+    records = list(ab_results.entries(root=app, min_age_days=args.days,
+                                      include_young=args.all,
+                                      stage_filter=args.stage))
+    rows = ab_results.rollup(records)
+    ab_results.print_report(rows, min_views=args.min_views,
+                            min_age_days=args.days or 0.0)
+    return 0
+
+
 def cmd_plan(args) -> int:
     """R8-A5: dry-run planner. Print EXACTLY how a run would route before it
     touches a browser or spends an API credit: resolved channel, scripting
@@ -260,6 +293,31 @@ def main(argv=None) -> int:
                         help="Workflow manifest name")
     p_plan.add_argument("-v", "--verbose", action="store_true")
     p_plan.set_defaults(func=cmd_plan)
+
+    p_ab = sub.add_parser(
+        "ab-results",
+        help="R11-W3: correlate recorded provider choices with post-publish "
+             "per-video performance (views + avg view duration)")
+    p_ab.add_argument("--fetch", action="store_true",
+                      help="Pull Studio analytics for published runs lacking a "
+                           "performance.json (needs the youtube login)")
+    p_ab.add_argument("--stage", choices=["tts", "assets", "llm"], default=None,
+                      help="Restrict the rollup to one stage")
+    p_ab.add_argument("--min-views", type=int, default=0,
+                      help="Hide provider rows with fewer total views than this")
+    p_ab.add_argument("--days", type=float, default=config.AB_RESULTS_MIN_AGE_DAYS,
+                      metavar="N",
+                      help="Only count videos at least N days old (default 7; "
+                           "assumes young videos have no meaningful analytics)")
+    p_ab.add_argument("--all", action="store_true",
+                      help="Include too-young runs in the rollup (they show as "
+                           "awaiting data)")
+    p_ab.add_argument("--headless", action="store_true",
+                      help="Run the analytics session hidden")
+    p_ab.add_argument("--browser", choices=["edge", "chrome", "brave", "chromium"],
+                      default=None, help="Browser engine to use")
+    p_ab.add_argument("-v", "--verbose", action="store_true")
+    p_ab.set_defaults(func=cmd_ab_results)
 
     p_run = sub.add_parser("run", help="Run the full pipeline. With a topic, that "
                                        "topic is scripted; without one, the Ask "

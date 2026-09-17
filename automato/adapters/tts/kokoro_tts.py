@@ -14,6 +14,16 @@ ends with an offline engine that is guaranteed to produce audio:
 
 Set config.TTS_PROVIDER to one of soundtools|edge_tts|pyttsx3 to force a single
 path; "auto" (default) runs the full chain.
+
+Weighted selection (R11-W2): "auto" feeds the chain through
+:mod:`automato.ab_test`, which rotates one provider (by default edge_tts, by
+weight, or by an explicit ``AUTOMATO_TTS_PIN``) to lead and keeps the rest in
+their original cascade order. The provider that actually served audio, the
+selection origin (weight/pinned/forced), and anything that failed are recorded
+to ``provider_choices.json`` in the run dir. A fallback provider that served
+the run because an earlier one FAILED, or in health mode, marks the run
+degraded (its publish downgrades to unlisted); one that the weight roll picked
+in A/B mode publishes at its normal visibility.
 """
 from __future__ import annotations
 
@@ -264,8 +274,20 @@ def run(ctx, inputs, run_dir, session=None):
     # no-channel fallback.
     language = (resolve_language(ctx.settings.channel_name, text) if ctx else
                 (detect_language(text) or "en"))
-    chain = build_tts_chain(text, provider, language=language)
+    base_chain = build_tts_chain(text, provider, language=language)
     voice = _resolve_edge_voice(language, edge_voice_for(language))
+
+    # R11-W2: weighted/pinnable selection on top of the ordered cascade. "auto"
+    # rotates one provider to lead (weight roll, or AUTOMATO_TTS_PIN to bypass
+    # the roll); the remaining providers keep their original order as the
+    # failure safety net. A forced TTS_PROVIDER short-circuits the roll.
+    from ... import ab_test
+
+    if provider == "auto":
+        chain, picked, chosen_by = ab_test.lead_with("tts", base_chain)
+    else:
+        chain, picked, chosen_by = base_chain, provider, "forced"
+    primary = base_chain[0]
 
     page = None
     if session is not None:
@@ -275,6 +297,7 @@ def run(ctx, inputs, run_dir, session=None):
             page = None
 
     used_method = None
+    failed: list = []
     for method in chain:
         try:
             if method == "soundtools":
@@ -299,12 +322,35 @@ def run(ctx, inputs, run_dir, session=None):
             used_method = method
             break
         except Exception as exc:  # noqa: BLE001
+            failed.append(method)
             log.warning("TTS provider '%s' failed: %s", method, exc)
             # last-chance 'auto' is pyttsx3 which is offline; if even that fails,
             # propagate the error (nothing else to try).
 
     if used_method is None:
         raise RuntimeError("All TTS providers failed")
+
+    # A fallback that SERVED the run is only allowed to keep normal visibility
+    # when the A/B weight roll picked it and it came up clean on a low-tier
+    # channel; a failure fallback, or health mode, degrades the run (publish
+    # downgrades to unlisted via gate_degraded).
+    degraded_reason, excluded = ab_test.decide_degraded(
+        "tts", ctx.settings.channel_name if ctx else None,
+        chosen_by, picked, used_method, bool(failed), primary)
+
+    ab_test.record_choice(run_dir, "tts", {
+        "provider": used_method,
+        "primary": primary,
+        "chosen_by": chosen_by,
+        "picked": picked,
+        "candidates": base_chain,
+        "weights": ab_test.weights_for("tts"),
+        "failed": failed,
+        "degraded": degraded_reason is not None,
+        "excluded_from_degradation": excluded,
+    })
+    if degraded_reason:
+        log.warning("TTS degraded: %s", degraded_reason)
 
     # Always ship a word-timings sidecar (R8-B2): real WordBoundary data when
     # edge-tts served the run, otherwise an honest "no real timing" marker the
@@ -318,4 +364,7 @@ def run(ctx, inputs, run_dir, session=None):
             "words": [],
             "estimated": True,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"audio": str(path), "word_timings": str(timings_path)}
+    result = {"audio": str(path), "word_timings": str(timings_path)}
+    if degraded_reason:
+        result["degraded_reason"] = degraded_reason
+    return result

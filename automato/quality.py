@@ -203,6 +203,22 @@ def _duration_of(path: str) -> float:
         return 0.0
 
 
+def gate_degraded(outputs: Dict[str, Any]) -> Optional[QualityGate]:
+    """A ``degraded_reason`` output key is a soft-fail for any stage.
+
+    R11-W2: fallback providers for the voiceover chain (soundtools/pyttsx3) are
+    lower fidelity than the zero-copy edge-tts primary, so a run whose narration
+    was only produced by a weight roll that split it to a fallback — in health
+    mode, or after an actual provider failure in either mode — must not go live
+    unreviewed. Exactly like ``gate_assets``, it downgrades the publish to
+    unlisted rather than blocking the run (soft-fail).
+    """
+    degraded = outputs.get("degraded_reason")
+    if degraded:
+        return QualityGate(False, f"stage reported a degraded fallback: {degraded}")
+    return None
+
+
 def gate_factcheck(outputs: Dict[str, Any]) -> Optional[QualityGate]:
     """R10-P2: a high-tier script whose review flagged a claim — or whose review
     pass got no reply at all — must not go live public: soft-fail (downgrade to
@@ -258,6 +274,10 @@ def run_gates(stage_id: str, outputs: Dict[str, Any],
             gates.append(r)
     elif stage_id == "assets":
         r = gate_assets(outputs, requested_images)
+        if r:
+            gates.append(r)
+    elif stage_id == "voiceover":
+        r = gate_degraded(outputs)
         if r:
             gates.append(r)
     elif stage_id == "assemble":

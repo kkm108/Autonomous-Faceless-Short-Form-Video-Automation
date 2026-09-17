@@ -272,6 +272,30 @@ EDGE_TTS_VOICES = {
 # Languages the registry may route to (publish channel + script + TTS voice).
 KNOWN_LANGUAGES = ("en", "es", "hi", "sa")
 
+# Weighted provider selection (A/B-test layer). Each provideric stage has an
+# ordered failure chain; the weight table only rotates who leads it (never
+# removes a provider, never reorders the rest of the cascade). Live env
+# overrides are read by ab_test.py at each call:
+#   AUTOMATO_<STAGE>_WEIGHTS="edge_tts:4,soundtools:1,pyttsx3:1"
+#   AUTOMATO_<STAGE>_PIN=<provider>   (bypasses the roll, deterministic lead)
+#   AUTOMATO_<STAGE>_AB_TEST=1        (opt into experiment mode per stage)
+# A weight of 0 keeps a provider in the chain as a failure fallback but never
+# rolls it to lead.
+DEFAULT_WEIGHTS = {
+    "tts": {"edge_tts": 4, "soundtools": 1, "pyttsx3": 1},
+    "assets": {"perchance": 4, "pollinations": 1},
+    "llm": {"ai_studio": 4, "duckai": 1, "ask_brave": 1, "gemini": 0, "chatgpt": 0},
+}
+# A/B-test mode is off by default (health-exercise semantics: any fallback use
+# degrades and downgrades the publish to unlisted). Even when True, a high-risk
+# tier channel is forced back to health semantics by ab_test.ab_enabled_for.
+TTS_AB_TEST = False
+ASSETS_AB_TEST = False
+LLM_AB_TEST = False
+# R11-W3: analytics correlation waits this long (days) after publish before a
+# run's views/retention are meaningful enough to roll up per provider.
+AB_RESULTS_MIN_AGE_DAYS = 7
+
 # Local ffmpeg/ffprobe budget (R1-W7): a stuck encode must not hang the pipeline
 # forever; this is the iteration timeout for each subprocess call.
 FFMPEG_TIMEOUT_S = 600
