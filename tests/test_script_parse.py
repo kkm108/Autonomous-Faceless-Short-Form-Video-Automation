@@ -2,6 +2,7 @@
 import pytest
 
 from automato.adapters.scripting import generic_llm
+from automato.llm import script_prompts
 
 
 def test_parse_script_minimal():
@@ -74,3 +75,15 @@ def test_build_review_prompt_embeds_script():
               "captions": ["c1", "c2"]}
     prompt = generic_llm._build_review_prompt(script, "finance")
     assert "finance" in prompt and "a claim" in prompt and "c1" in prompt
+
+
+def test_image_prompt_requires_distinct_subjects_per_caption():
+    # R11-F3: the scripting prompt must demand a DIFFERENT concrete subject per
+    # IMAGE line (the drift that made five of six slides show the same object).
+    prompt = script_prompts.SYS_PREAMBLE
+    assert "every IMAGE line must describe a DIFFERENT concrete subject" in prompt
+    assert "do not repeat the same key subject nouns" in prompt
+    # pure requirement prose: no literal examples/placeholders a small UI could echo
+    assert "<" not in prompt and "e.g." not in prompt.lower()
+    sys_prompt = script_prompts.build_system_prompt("keyboards", "en", "warm")
+    assert "keyboards" in sys_prompt and "warm" in sys_prompt

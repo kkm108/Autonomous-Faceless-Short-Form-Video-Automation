@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -34,6 +35,34 @@ MIN_IMAGE_FRACTION = 0.8
 DURATION_TOLERANCE_S = 5.0
 # Post-assembly audio must have at least this much peak volume to count as audible.
 MIN_AUDIO_PEAK = 0.02
+
+# R11-F3 image-prompt variety safeguard (non-fatal, first-pass): a content word
+# seen in at least this many of a video's IMAGE prompts is flagged as a repeated
+# subject. Threshold overridable via AUTOMATO_IMAGE_REPEAT_MIN.
+IMAGE_REPEAT_MIN = int(os.environ.get("AUTOMATO_IMAGE_REPEAT_MIN", "3"))
+
+# Generic filler + template-aesthetic vocabulary that recurs in every prompt and
+# is therefore not a *subject* signal. Content nouns (keyboard, typewriter, hands)
+# are deliberately NOT stopwords — they are what the flag is meant to catch.
+_PROMPT_STOP = frozenset("""
+the a an of to in on with and or for from by at as is are was were be been being
+it its it's this that these those have has had do does did will would can could
+should may might must about over under between during through after before each
+every both when where which who whom whose very too just also than then there
+here but not no nor so if else all any more most other some such only own same
+don now up down out off again further once here same your my me him her theirs
+with out every any make made makes use using used includes include featuring
+set classic vintage retro nostalgic old but sets make
+red blue green yellow black white orange purple pink brown grey gray gold golden
+silver cyan teal maroon beige navy amber copper rose
+cinematic mood lighting aesthetic style scene background clean backdrop
+composition atmosphere tone warm soft glowing dramatic vibrant bright colorful
+deep dark modern sleek minimalist clean no text watermark watermarks faceless
+face faces person people macro close-up closeup extreme wide aerial shot view
+angle focus soft-focus blurred blurry stock photo photography illustration art
+render concept model small mini detailed high-quality photorealistic realistic
+vibrant lighting light lights glow glow-glass radiance stillness clipart studio
+""".split())
 
 
 class QualityGate:
@@ -73,6 +102,69 @@ def gate_script(outputs: Dict[str, Any]) -> Optional[QualityGate]:
     if not script.get("captions"):
         return QualityGate(False, "no captions in script", hard=True)
     return None
+
+
+def _prompt_content_words(prompt: str) -> set:
+    """Unstopped, lightly-normalised content words in one image prompt."""
+    words = {w.lower() for w in re.findall(r"[a-záéíóúñ]+", prompt.lower())}
+    content = set()
+    for w in words:
+        if w in _PROMPT_STOP or len(w) < 3:
+            continue
+        # a light singular/plural merge ('keys' -> 'key') that spares words
+        # genuinely ending in 'ss' (chess, glass), so those stay untouched.
+        if w.endswith("s") and not w.endswith("ss") and len(w) > 4:
+            content.add(w[:-1])
+        else:
+            content.add(w)
+    return content
+
+
+def repeated_image_subjects(prompts) -> Tuple[bool, list]:
+    """(flag, subjects) — a content word shared by >= IMAGE_REPEAT_MIN prompts.
+
+    A cheap first-pass over-representation signal, not a semantic check: it counts
+    unigram overlap only, so a script that drifts back to the same concrete subject
+    across its slides (e.g. 'typewriter' in 5 of 6 prompts) is caught without
+    needing any model call. The result is advisory only.
+    """
+    counts: Dict[str, int] = {}
+    for prompt in prompts:
+        for w in _prompt_content_words(str(prompt)):
+            counts[w] = counts.get(w, 0) + 1
+    subjects = sorted(w for w, n in counts.items() if n >= IMAGE_REPEAT_MIN)
+    return bool(subjects), subjects
+
+
+def record_script_quality(run_dir, outputs) -> Optional[Path]:
+    """Write the non-fatal image-prompt variety flag to script_quality.json
+    (R11-F3). Never blocks or downgrades — the orchestrator calls this purely to
+    leave a review trail. Returns the artifact path, or None when no script
+    artifact exists to analyse.
+    """
+    path = outputs.get("script") if outputs else None
+    if not path or not str(path).strip():
+        return None
+    try:
+        script = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    prompts = script.get("image_prompts") or []
+    flag, subjects = repeated_image_subjects(prompts)
+    artifact = Path(run_dir) / "script_quality.json"
+    artifact.write_text(json.dumps({
+        "image_prompt_repetition": {
+            "flag": flag,
+            "repeated_subjects": subjects,
+            "minimum_prompts": IMAGE_REPEAT_MIN,
+            "prompt_count": len(prompts),
+        },
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    if flag:
+        log.warning(
+            "Image prompts repeat subject(s) %s across %d prompt(s); written for "
+            "review: %s", subjects, len(prompts), artifact.name)
+    return artifact
 
 
 def _image_file_hashes(files) -> list:

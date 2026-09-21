@@ -285,6 +285,8 @@ DEFAULT_WEIGHTS = {
     "tts": {"edge_tts": 4, "soundtools": 1, "pyttsx3": 1},
     "assets": {"perchance": 4, "pollinations": 1},
     "llm": {"ai_studio": 4, "duckai": 1, "ask_brave": 1, "gemini": 0, "chatgpt": 0},
+    # R11-F3: per-slide Ken Burns motion style (assembly/ffmpeg MOTION_PRESETS).
+    "motion": {"zoom_in": 1, "zoom_out": 1, "pan_left": 1, "pan_right": 1, "drift": 1},
 }
 # A/B-test mode is off by default (health-exercise semantics: any fallback use
 # degrades and downgrades the publish to unlisted). Even when True, a high-risk

@@ -28,6 +28,11 @@ log = logging.getLogger(__name__)
 
 STAGES = ("tts", "assets", "llm")
 _VIDEO_ID_RE = re.compile(r"[?&]v=([A-Za-z0-9_-]{11})")
+# A no_data record is retryable, but not forever: the fetch may be hitting a
+# video id that will never carry our analytics (e.g. an id strayed into the
+# run's post_url from another channel), so each run gets a bounded number of
+# attempts before it is retired instead of re-scraped on every future pass.
+_NO_DATA_RETRY_CAP = 3
 
 
 def _load_json(path) -> "dict | None":
@@ -193,11 +198,14 @@ def fetch_performance(root=None, session=None, min_age_days: float = 0.0,
 
     Returns one record per attempted run: ``fetched`` (ok), ``no_data`` (too
     young / not yet indexed), ``skipped`` (no logged-in session or no video id),
-    ``error``. A run whose video is too recent has no analytics, which is the
+    ``retired`` (a no_data run that exhausted its retry budget), ``error``. A run
+    whose video is too recent has no analytics, which is the
     expected outcome — recorded, never fatal. A ``no_data`` record is NOT a
     lock: Studio may simply have had nothing to render at that moment, so a
     later invocation re-attempts it rather than silently leaving the run
-    without analytics forever.
+    without analytics forever. Retries are bounded by ``_NO_DATA_RETRY_CAP`` so
+    a run whose recorded video id never produces our analytics (stray id, other
+    channel) is retired instead of re-scraped on every pass.
     """
     root = Path(root) if root else config.OUTPUT_DIR
     out: list = []
@@ -214,6 +222,11 @@ def fetch_performance(root=None, session=None, min_age_days: float = 0.0,
         # stays retryable so the real numbers can be captured on a later pass.
         if perf is not None and perf.get("status") != "no_data":
             continue
+        # A persisted no_data file implies at least one prior fetch pass.
+        prev_attempts = int(perf.get("attempts") or 1) if perf is not None else 0
+        if prev_attempts >= _NO_DATA_RETRY_CAP:
+            out.append({"run_id": run_dir.name, "status": "retired"})
+            continue
         age = published_age_days(run_dir) or 0.0
         if age < min_age_days:
             continue
@@ -223,6 +236,7 @@ def fetch_performance(root=None, session=None, min_age_days: float = 0.0,
             continue
         page = session.first_page()
         result = studio_metrics.fetch_metrics(page, vid)
+        result["attempts"] = prev_attempts + 1
         (Path(run_dir) / "performance.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         attempts += 1

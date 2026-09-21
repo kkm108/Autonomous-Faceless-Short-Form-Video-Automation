@@ -202,3 +202,78 @@ def test_video_gate_detects_missing_audio_stream(tmp_path: Path):
     r = quality.gate_video({"video": str(plain)}, expected_s=None)
     assert r is not None
     assert "no audio" in r.message and not r.hard
+
+
+# ---------------------------------------------------------------------------
+# R11-F3: image-prompt subject-variety advisory flag (non-fatal)
+# ---------------------------------------------------------------------------
+
+def test_repeated_image_subjects_flags_keyboard_drift():
+    # Mirrors the live 'Why Your Keyboard...' video: five of six IMAGE prompts
+    # drifted back onto the same concrete subject while one slid to a different
+    # visual — the engine must NOT pass that silently anymore.
+    prompts = [
+        "Vintage 1800s mechanical typewriter on a wooden desk, cinematic mood",
+        "Close-up of antique typewriter keys, warm lighting",
+        "Typewriter ribbon spools and keys, soft glow",
+        "Copper gears inside a typewriter mechanism, dramatic lighting",
+        "Faceless hands typing on an old typewriter, clean dark background",
+        "A modern laptop with a glowing keyboard at night, minimalist",
+    ]
+    flag, subjects = quality.repeated_image_subjects(prompts)
+    assert flag is True
+    assert "typewriter" in subjects
+
+
+def test_repeated_image_subjects_clear_when_subjects_differ():
+    prompts = [
+        "A lone lighthouse in a storm at dusk, moody sky",
+        "A paper boat drifting on ocean waves, golden light",
+        "Seabirds circling a wooden pier, morning haze",
+        "Dried starfish and rope on wet sand, pale light",
+        "A brass compass on an open nautical chart, warm lamp",
+        "A harbor town seen from the hill at blue hour, glowing windows",
+    ]
+    flag, subjects = quality.repeated_image_subjects(prompts)
+    assert flag is False
+    assert subjects == []
+
+
+def test_repeated_image_subjects_ignores_template_boilerplate():
+    prompts = [
+        "A red bicycle parked by a concrete wall, no text, clean background",
+        "A red vintage car on a quiet street, cinematic mood",
+        "A red metal sign painted with old letters, no faces",
+    ]
+    flag, subjects = quality.repeated_image_subjects(prompts)
+    # 'red' repeats, but template filler like 'no text'/'clean background'/
+    # 'cinematic mood' must never count as a shared subject.
+    assert flag is False
+
+
+def test_record_script_quality_writes_sidecar_non_fatal(tmp_path: Path):
+    p = tmp_path / "script.json"
+    p.write_text(json.dumps({
+        "spoken_script": "word " * 45 + "End.",
+        "captions": [1, 2],
+        "image_prompts": [
+            "A chess king piece in resin, dramatic light",
+            "A chess knight carved in ivory, soft glow",
+            "A chess pawn toppled on its board, moody",
+            "A chess board mid-game at golden hour, cinematic",
+            "A chess rook against a sunrise sky, minimal",
+            "Sliced chess pieces scattered on marble, clean",
+        ],
+    }), encoding="utf-8")
+    out = quality.record_script_quality(tmp_path, {"script": str(p)})
+    assert out is not None and out.is_file()
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["image_prompt_repetition"]["flag"] is True
+    assert "chess" in data["image_prompt_repetition"]["repeated_subjects"]
+    # advisory only: nothing is hard-failed or downgraded by the record itself
+    assert quality.run_gates("script", {"script": str(p)}) == []
+
+
+def test_record_script_quality_returns_none_without_script(tmp_path: Path):
+    assert quality.record_script_quality(tmp_path, {}) is None
+    assert quality.record_script_quality(tmp_path, None) is None

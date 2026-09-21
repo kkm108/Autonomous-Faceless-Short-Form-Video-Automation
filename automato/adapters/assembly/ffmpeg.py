@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import re
 import subprocess
 from pathlib import Path
@@ -29,7 +30,7 @@ from typing import List
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ... import channels, config
+from ... import ab_test, channels, config
 from . import caption_timing
 
 log = logging.getLogger(__name__)
@@ -174,8 +175,24 @@ def _overlay_logo(im: "Image.Image", logo: "Path | None"):
 # tokens are now hard-broken across lines and the wrapped block is scaled down
 # until it fits, so a published caption can never leave the safe area. The box
 # floor keeps even pathological tokens legible.
+#
+# R11-F1 follow-up: the fit/placement still measured only the glyph ADVANCE width
+# (``draw.textlength``), which ignores the ink that stretches LEFT of the pen
+# origin (negative left-side bearing) and the 4px drop shadow. A line whose
+# advance just filled the box was therefore centred at x≈0 and its ink landed
+# ~2px from the frame edge (reproduced live: 'Why is your keyboard' at 2.0px in
+# the keyboard video). Fitting now measures the true ink BOUNDING BOX and reserves
+# a widened margin on both sides, and each line is centred by its ink rather than
+# its advance, so published captions keep a real safety gap from the frame edges.
 _MIN_FONT_SIZE = 28
 _FIT_SCALES = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.42, 0.35)
+# Widened safety margin each side (the caption box previously implied a 60px
+# margin via ``W - 120``; the ink-plus-stroke guard reserves 72px so a near-full
+# line cannot reach the edge). ``CAPTION_FLOOR_X`` is the absolute floor that even
+# the min-font escape hatch clamps to (a pathological line can never be clipped).
+CAPTION_MARGIN_X = 72
+CAPTION_FLOOR_X = 8
+_SHADOW_OFFSET = 4
 
 
 def _fit_blank(font, box_w, box_h) -> dict:
@@ -235,20 +252,41 @@ def _shrink_font(font, scale):
         return font
 
 
+def _line_ink(draw, ln: str, font) -> tuple:
+    """(left, right) ink extent of a line's glyphs relative to the pen origin,
+    from the glyph BOUNDING BOX. ``textlength`` only reports the ADVANCE width,
+    so a glyph whose ink hangs left of the pen origin (negative left-side bearing,
+    heavy strokes, or the drop shadow) could previously push past a frame edge
+    even when the advance said the line fit (R11-F1)."""
+    left, _top, right, _bottom = draw.textbbox((0, 0), ln, font=font)
+    return left, right
+
+
 def _fit_metrics(draw, font, lines: List[str], box_w, box_h) -> dict:
     """Rendered-fit facts for the R10 assembly self-check: does the wrapped block
-    actually sit inside the box's safe area before compositing?"""
+    actually sit inside the box's safe area before compositing?
+
+    R11-F1: the fit gate now measures the true INK width of the widest line and
+    requires it to stay inside the frame with the widened CAPTION_MARGIN_X on
+    each side (the old gate only compared the glyph-advance width against the box,
+    which let ink reach ~2px from the frame edge). ``max_line_px`` is kept so the
+    advance-based wrap/box checks and their tests remain intact.
+    """
     widths = [draw.textlength(ln, font=font) for ln in lines] or [0.0]
+    inks = [_line_ink(draw, ln, font) for ln in lines]
+    ink_width = max((r - left) for left, r in inks) if inks else 0.0
     line_h = font.size * 1.15
     block_px = line_h * len(lines)
     return {
         "lines": len(lines),
         "max_line_px": max(widths),
+        "max_ink_px": round(ink_width, 1),
+        "margin_x": CAPTION_MARGIN_X,
         "box_w": box_w,
         "block_px": block_px,
         "box_h": box_h,
         "font_size": font.size,
-        "fit": max(widths) <= box_w and block_px <= box_h,
+        "fit": ink_width + 2 * CAPTION_MARGIN_X <= W and block_px <= box_h,
     }
 
 
@@ -281,20 +319,122 @@ def _draw_text_wrapped(draw, text, box_w, box_h, font, fill) -> dict:
     total_h = line_h * len(lines)
     y = (box_h - total_h) / 2
     for ln in lines:
-        w_ln = draw.textlength(ln, font=applied)
-        x = (box_w - w_ln) / 2
+        l_ink, r_ink = _line_ink(draw, ln, applied)
+        ink_w = r_ink - l_ink
+        # center the INK (not the advance) so a leading-bearing glyph can never
+        # punch past a frame edge, then clamp each edge to the absolute floor the
+        # min-font escape hatch is allowed to use (R11-F1).
+        x = (W - ink_w) / 2 - l_ink
+        if x + l_ink < CAPTION_FLOOR_X:
+            x = CAPTION_FLOOR_X - l_ink
+        if x + r_ink > W - CAPTION_FLOOR_X:
+            x = W - CAPTION_FLOOR_X - r_ink
         # soft shadow for readability
-        draw.text((x + 4, y + 4), ln, font=applied, fill=(0, 0, 0, 180))
+        draw.text((x + _SHADOW_OFFSET, y + _SHADOW_OFFSET), ln, font=applied,
+                  fill=(0, 0, 0, 180))
         draw.text((x, y), ln, font=applied, fill=fill)
         y += line_h
     return _fit_metrics(draw, applied, lines, box_w, box_h)
+
+
+# R11-F1: an asset from a provider with a different native aspect (Perchance
+# 512x768 / 768x768, pollinations' letterboxed 1080x1920) sometimes carries a
+# BAKED black letterbox/pillarbox bar already in its pixels. _render_slide's
+# resize-to-fill runs on every image regardless of source, but a stretch cannot
+# remove a bar that is part of the image -- it just scales it. Before filling,
+# near-uniform, near-black edge bands are cropped so the rendered slide actually
+# covers the frame. Thresholds stay conservative (a genuinely dark photograph has
+# more variance and hot pixels than a constant bar) and each side is capped so a
+# whole-frame-dark asset is never gutted.
+_CROP_BAND_MAX_FRACTION = 1 / 6
+_CROP_BLACK_MEAN = 34
+_CROP_BLACK_STD = 5.0
+_CROP_BLACK_MAX = 70
+_CROP_BLACK_FRACTION = 0.95
+
+
+def _gray_median(gray) -> int:
+    hist = gray.histogram()
+    total = sum(hist)
+    half = total // 2
+    acc = 0
+    for idx, n in enumerate(hist):
+        acc += n
+        if acc >= half:
+            return int(idx)
+    return 255
+
+
+def _bar_strip_like(strip, median) -> bool:
+    """Is a 1px edge strip a near-uniform, near-black bar (versus dark content)?
+    Uses the same PIL primitives as the tests (no numpy dependency). Besides the
+    near-black/uniform checks, the strip must be MEANINGFULLY DARKER THAN THE
+    FRAME MEDIAN: a letterbox bar is always darker than the picture next to it,
+    whereas a uniformly dark (noise-only) frame would otherwise match every
+    check and get its edges gutted."""
+    gray = strip.convert("L")
+    hist = gray.histogram()
+    total = max(sum(hist), 1)
+    fraction_black = sum(hist[: int(_CROP_BLACK_MEAN) + 1]) / total
+    if fraction_black < _CROP_BLACK_FRACTION:
+        return False
+    lo, hi = gray.getextrema()
+    if hi > _CROP_BLACK_MAX:
+        return False
+    mean = sum(i * n for i, n in enumerate(hist)) / total
+    if mean + 8 >= median:
+        return False
+    from PIL import ImageStat
+    std = ImageStat.Stat(gray).stddev[0]
+    return std <= _CROP_BLACK_STD
+
+
+def _black_edge_band(gray, dim: int, edge) -> int:
+    """Max run of consecutive bar-like 1px strips inward from `edge` ('top',
+    'bottom', 'left', 'right'), capped per side. Walk stops at the first strip
+    that is not bar-like, so a real bar (which has content after it) is removed
+    while a uniformly dark frame (no bar-vs-content contrast) leaves its edges
+    untouched."""
+    median = _gray_median(gray)
+    cap = max(1, int(dim * _CROP_BAND_MAX_FRACTION))
+    run = 0
+    for o in range(cap):
+        coord = o if edge in ("top", "left") else dim - 1 - o
+        if edge in ("top", "bottom"):
+            strip = gray.crop((0, coord, gray.width, coord + 1))
+        else:
+            strip = gray.crop((coord, 0, coord + 1, gray.height))
+        if not _bar_strip_like(strip, median):
+            break
+        run += 1
+    return run
+
+
+def _crop_black_margins(im) -> "Image.Image":
+    """Crop baked black letterbox/pillarbox bands off every edge (R11-F1)."""
+    original = im.size
+    gray = im.convert("L")
+    top = _black_edge_band(gray, gray.height, "top")
+    bottom = _black_edge_band(gray, gray.height, "bottom")
+    left = _black_edge_band(gray, gray.width, "left")
+    right = _black_edge_band(gray, gray.width, "right")
+    box = (left, top, im.size[0] - right, im.size[1] - bottom)
+    if box[:2] == (0, 0) and box[2:] == original:
+        return im
+    return im.crop(box)
+
+
+def _fill_frame(bg) -> "Image.Image":
+    """Foreground-fill `bg` to the exact 1080x1920 frame, cropping baked black
+    letterbox bars before the resize (R11-F1)."""
+    return _crop_black_margins(bg).resize((W, H), Image.LANCZOS)
 
 
 def _render_slide(bg_path: Path, caption: str, out_path: Path,
                   accent: "tuple | None" = None, font_path: "Path | None" = None,
                   logo_path: "Path | None" = None):
     bg = Image.open(bg_path).convert("RGB")
-    bg = bg.resize((W, H), Image.LANCZOS)
+    bg = _fill_frame(bg)
     # subtle dark overlay for text contrast
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -342,7 +482,7 @@ def _render_thumbnail(bg_path: Path, title: str, out_path: Path,
                       font_path: "Path | None" = None):
     """Channel-branded 1080x1920 thumbnail: darkened image + big title (B7)."""
     bg = Image.open(bg_path).convert("RGB")
-    bg = bg.resize((W, H), Image.LANCZOS)
+    bg = _fill_frame(bg)
     shade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(shade)
     d.rectangle([0, 0, W, H], fill=(0, 0, 0, 70))
@@ -373,6 +513,87 @@ def _probe_duration(path: Path) -> float:
         return float(proc.stdout.strip())
     except Exception:  # noqa: BLE001
         return 0.0
+
+
+# R11-F3 Ken Burns variety: the single fixed zoom-in preset is replaced by a small
+# rotating set picked PER SLIDE through the same weighted/pinnable mechanism the
+# provider cascade uses (ab_test.lead_with: AUTOMATO_MOTION_WEIGHTS env weights,
+# AUTOMATO_MOTION_PIN override, deterministic per-segment seed). Scope is motion /
+# pacing ONLY: font, colour and caption position stay governed by the channel
+# branding profile (R8). Expressions are baked with the real frame count and the
+# chosen preset is recorded to a motion.json sidecar (kept out of
+# provider_choices.json so the batch A/B analytics stay clean).
+MOTION_PRESETS = {
+    "zoom_in": {
+        "z": "min(zoom+0.0015,1.20)",
+        "x": "iw/2-(iw/zoom/2)",
+        "y": "ih/2-(ih/zoom/2)",
+        "label": "slow zoom in",
+    },
+    "zoom_out": {
+        "z": "max(1.20-(on-1)*0.0015,1.0)",
+        "x": "iw/2-(iw/zoom/2)",
+        "y": "ih/2-(ih/zoom/2)",
+        "label": "slow zoom out",
+    },
+    "pan_left": {
+        "z": "1.18",
+        "x": "(iw-(iw/zoom))*(1-((on-1)/{den}))",
+        "y": "ih/2-(ih/zoom/2)",
+        "label": "pan left",
+    },
+    "pan_right": {
+        "z": "1.18",
+        "x": "(iw-(iw/zoom))*((on-1)/{den})",
+        "y": "ih/2-(ih/zoom/2)",
+        "label": "pan right",
+    },
+    "drift": {
+        "z": "1.08",
+        "x": "iw/2-(iw/zoom/2)",
+        "y": "(ih-(ih/zoom))*(({frames}-on)/{den})",
+        "label": "subtle static drift",
+    },
+}
+MOTION_CHAIN = list(MOTION_PRESETS)
+
+
+def _zoompan_filter(name: str, frames: int) -> str:
+    """The zoompan -vf expression for a motion preset, over ``frames`` output
+    frames. Expressions are baked with the real per-segment frame count (never
+    the ``duration`` variable) so each preset is deterministic per segment."""
+    preset = MOTION_PRESETS[name]
+    den = max(1, frames - 1)
+    z = preset["z"].format(frames=frames, den=den)
+    x = preset["x"].format(frames=frames, den=den)
+    y = preset["y"].format(frames=frames, den=den)
+    return (f"zoompan=z='{z}':d={frames}:s={W}x{H}:fps={FPS}:"
+            f"x='{x}':y='{y}'")
+
+
+def _motion_pick(seed_ref, index: int) -> tuple:
+    """(preset name, chosen_by label) for one segment, seeded from a stable key so
+    a resumed run reproduces its motion plan. Production passes the run dir name
+    (deterministic per run); unit tests pass any stable key."""
+    rng = None
+    if seed_ref is not None:
+        rng = random.Random(f"motion:{seed_ref}:{index}")
+    _rotated, head, chosen_by = ab_test.lead_with("motion", MOTION_CHAIN, rng=rng)
+    return head, chosen_by
+
+
+def _write_motion_sidecar(run_dir: Path, choices: list) -> Path:
+    """Record the per-slide motion plan (R11-F3 audit trail). Deliberately kept
+    out of provider_choices.json: the batch A/B correlation reads that file across
+    all stages generically, and motion is presentation, not rendering choice."""
+    out = run_dir / "motion.json"
+    out.write_text(json.dumps({
+        "stage": "motion",
+        "weights": ab_test.weights_for("motion"),
+        "pin": ab_test.pinned_for("motion"),
+        "per_segment": choices,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out
 
 
 def run(ctx, inputs, run_dir, session=None):
@@ -417,28 +638,36 @@ def run(ctx, inputs, run_dir, session=None):
 
     # 2) Render each slide as its own Ken Burns clip; per-segment timing means
     #    the zoom animation restarts with each caption, not one continuous pan.
+    #    R11-F3: motion style rotates through the preset set per slide instead of
+    #    the former single zoom-in, driven by the same weights/pin mechanics.
     segments_dir = run_dir / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
     seg_paths = []
+    motion_choices = []
+    motion_seed = run_dir.name
     for i, seg in enumerate(plan):
         span = max(seg["end_s"] - seg["start_s"], 0.1)
         frames = max(1, round(span * FPS))
         out = segments_dir / f"seg_{i:03d}.mp4"
+        motion, chosen_by = _motion_pick(motion_seed, i)
         cmd = [
             "ffmpeg", "-y",
             "-loop", "1", "-framerate", str(FPS), "-t", f"{span:.3f}",
             "-i", str(slide_paths[i]),
-            "-vf",
-            f"zoompan=z='min(zoom+0.0015,1.20)':d={frames}:"
-            f"s={W}x{H}:fps={FPS}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+            "-vf", _zoompan_filter(motion, frames),
             "-frames:v", str(frames),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
             "-pix_fmt", "yuv420p",
             str(out),
         ]
-        log.info("Rendering slide segment %d/%d (%.2fs)...", i + 1, len(plan), span)
+        log.info("Rendering slide segment %d/%d (%.2fs, motion=%s)...",
+                 i + 1, len(plan), span, motion)
         _run(cmd)
         seg_paths.append(out)
+        motion_choices.append({"slide": i, "preset": motion,
+                               "label": MOTION_PRESETS[motion]["label"],
+                               "chosen_by": chosen_by})
+    motion_path = _write_motion_sidecar(run_dir, motion_choices)
 
     # 3) Losslessly concat the segments, then mux audio.
     list_file = run_dir / "segments.txt"
@@ -516,6 +745,7 @@ def run(ctx, inputs, run_dir, session=None):
         "thumbnail": str(thumbnail_path),
         "metadata": str(metadata_path),
         "caption_fit": str(fit_path),
+        "motion": str(motion_path),
     }
 
 

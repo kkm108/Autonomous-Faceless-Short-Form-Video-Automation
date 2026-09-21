@@ -517,6 +517,31 @@ def test_fetch_performance_retries_no_data_records(tmp_path, monkeypatch):
     assert recorded["status"] == "ok"
 
 
+def test_fetch_performance_retires_no_data_after_retry_cap(tmp_path, monkeypatch):
+    """A no_data run that never produces analytics (e.g. a stray video id from
+    another channel) must be retired once it hits the retry cap, not re-scraped
+    on every fetch pass forever."""
+    run_dir = _fake_run(
+        tmp_path, "run_ndjunk",
+        "https://www.youtube.com/watch?v=NDXXX000002",
+        choices={"tts": {"provider": "edge_tts"}},
+        perf={"status": "no_data", "attempts": ab_results._NO_DATA_RETRY_CAP})
+
+    class _Session:
+        def first_page(self):
+            return None
+
+    monkeypatch.setattr(
+        ab_results.studio_metrics, "fetch_metrics",
+        lambda page, video_id: {"views": None, "status": "no_data"})
+    fetched = ab_results.fetch_performance(root=tmp_path, session=_Session(),
+                                           min_age_days=0.0)
+    assert fetched == [{"run_id": "run_ndjunk", "status": "retired"}]
+    recorded = json.loads((run_dir / "performance.json").read_text(encoding="utf-8"))
+    assert recorded["attempts"] == ab_results._NO_DATA_RETRY_CAP
+    assert recorded["status"] == "no_data"
+
+
 def test_legacy_choices_backfills_regression(tmp_path):
     d = _fake_run(tmp_path, "run_z", url=None)
     (d / "word_timings.json").write_text(

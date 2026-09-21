@@ -363,6 +363,11 @@ def _run_workflow_locked(workflow_name: str, seed: Dict[str, Any],
                         level, sid, gate.message)
             ctx.settings.force_unlisted = True
 
+        # R11-F3: non-fatal image-prompt variety advisory trail (never blocks).
+        if sid == "script":
+            from .quality import record_script_quality
+            record_script_quality(state.run_dir, outputs)
+
         log.info("Stage '%s' complete in %.1fs", sid, time.time() - t0)
         state.mark_stage_timing(sid, time.time() - t0)
 
